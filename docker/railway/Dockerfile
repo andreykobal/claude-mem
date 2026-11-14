@@ -1,16 +1,15 @@
-# claude-mem server image for Railway: one image, two services.
+# claude-mem server image for Railway (see docker/railway/README.md).
 #
-#   CLAUDE_MEM_CONTAINER_MODE=server  HTTP /v1 + MCP + search (no generation)
-#   CLAUDE_MEM_CONTAINER_MODE=worker  BullMQ generation worker
+# One container serves HTTP /v1 + MCP + search and, unless
+# CLAUDE_MEM_GENERATION_DISABLED is set, runs observation generation in the
+# same process (CLAUDE_MEM_CONTAINER_MODE=worker still runs a split worker).
 #
 # Unlike docker/claude-mem/Dockerfile, this one builds the plugin bundles from
-# source in its first stage, so Railway can build straight from the repository
-# without a host-side `npm run build`.
+# source in its first stage, so no host-side `npm run build` is needed.
 #
 # Generation runs through a Claude subscription
 # (CLAUDE_MEM_SERVER_PROVIDER=claude-subscription + CLAUDE_CODE_OAUTH_TOKEN),
-# which needs the Claude Code CLI in the image. The server service never
-# launches it.
+# which needs the Claude Code CLI in the image.
 
 # ---------- build: plugin bundles from source ----------
 FROM node:22-trixie AS build
@@ -20,8 +19,21 @@ ENV BUN_INSTALL="/usr/local/bun"
 RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}"
 ENV PATH="/usr/local/bun/bin:${PATH}"
 
+# Source: the build context, or, when CLAUDE_MEM_SOURCE_REF is set, that exact
+# commit of the repository. `railway up` leaves hidden files (the plugin
+# manifests, .mcp.json) out of its upload, so Railway builds pass the deployed
+# commit and clone it instead; local builds keep using the working tree.
+ARG CLAUDE_MEM_SOURCE_REPO=https://github.com/andreykobal/claude-mem.git
+ARG CLAUDE_MEM_SOURCE_REF=
+COPY . /context
+RUN if [ -n "$CLAUDE_MEM_SOURCE_REF" ]; then \
+      git clone --filter=blob:none --no-checkout "$CLAUDE_MEM_SOURCE_REPO" /src \
+      && git -C /src checkout --quiet "$CLAUDE_MEM_SOURCE_REF"; \
+    else \
+      cp -a /context/. /src/; \
+    fi \
+ && rm -rf /context
 WORKDIR /src
-COPY . .
 # Bundling needs no native add-ons, and some grammar postinstalls need a newer
 # glibc than bookworm ships; the runtime stage installs its own dependencies.
 RUN npm install --no-audit --no-fund --ignore-scripts \
@@ -82,7 +94,7 @@ RUN cd /opt/claude-mem \
 USER root
 RUN mkdir -p /home/node/.claude /home/node/.claude-mem /data/claude-mem \
  && chown -R node:node /home/node/.claude /home/node/.claude-mem /data/claude-mem
-COPY --chown=node:node docker/claude-mem/entrypoint.sh /usr/local/bin/claude-mem-entrypoint
+COPY --from=build --chown=node:node /src/docker/claude-mem/entrypoint.sh /usr/local/bin/claude-mem-entrypoint
 RUN chmod +x /usr/local/bin/claude-mem-entrypoint
 
 USER node

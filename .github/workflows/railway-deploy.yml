@@ -1,0 +1,64 @@
+# Fork-only: deploy the claude-mem server to Railway (see docker/railway/README.md).
+# Checks the changed server pieces, then uploads the repository and lets Railway
+# build docker/railway/Dockerfile. RAILWAY_TOKEN is a project token scoped to
+# the claude-mem project's production environment.
+name: railway-deploy
+
+on:
+  push:
+    branches: [feat/railway-subscription-server]
+    paths:
+      - 'src/**'
+      - 'plugin/**'
+      - 'scripts/build-hooks.js'
+      - 'docker/railway/**'
+      - 'docker/claude-mem/entrypoint.sh'
+      - 'package.json'
+      - '.github/workflows/railway-deploy.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: railway-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.repository == 'andreykobal/claude-mem'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.12
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund --ignore-scripts
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Server tests
+        run: >-
+          bun test
+          tests/server/generation/claude-subscription-provider.test.ts
+          tests/server/middleware/project-name-resolver.test.ts
+          tests/hooks/runtime-selector.test.ts
+          tests/build/server-bundle-import-meta.test.ts
+
+      # `railway up` drops hidden files from its upload, so the image build
+      # clones this exact commit instead (CLAUDE_MEM_SOURCE_REF build arg).
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          npx --yes @railway/cli@5.74.0 variable set --service claude-mem --skip-deploys "CLAUDE_MEM_SOURCE_REF=${GITHUB_SHA}"
+          npx --yes @railway/cli@5.74.0 up --service claude-mem --ci
