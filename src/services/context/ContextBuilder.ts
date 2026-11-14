@@ -660,7 +660,7 @@ export async function generateContextWithStats(
   forHuman: boolean = false,
   options: ContextReadOptions = {},
 ): Promise<ContextReadResult> {
-  const runtime = resolveRuntimeContext();
+  const runtime = resolveRuntimeContext(input?.cwd);
   if (runtime.runtime === 'server') {
     return generateServerContextWithStats(runtime, input, forHuman);
   }

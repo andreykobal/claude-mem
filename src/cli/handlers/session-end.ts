@@ -29,7 +29,7 @@ export const sessionEndHandler: EventHandler = {
     }
 
     const platformSource = normalizePlatformSource(input.platform);
-    const runtime = resolveRuntimeContext();
+    const runtime = resolveRuntimeContext(input.cwd);
     if (runtime.runtime === 'server') {
       logger.debug('HOOK', 'session-end: Server runtime handling is not implemented, skipping', {
         sessionId,

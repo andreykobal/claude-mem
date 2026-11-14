@@ -96,7 +96,7 @@ export const observationHandler: EventHandler = {
       return spoolObservation(input, platformSource);
     }
 
-    const runtime = resolveRuntimeContext();
+    const runtime = resolveRuntimeContext(input.cwd);
     // Phase 1a (cmem-sdk rename): `runtime.runtime` is the canonical `'server'`
     // value. `runtime-selector.selectRuntime()` continues to accept the legacy
     // `'server-beta'` literal in settings.json and normalizes it to `'server'`.

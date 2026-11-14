@@ -52,7 +52,7 @@ export const fileEditHandler: EventHandler = {
     // a local hook spool no worker exists to drain (that silently dropped every
     // edit). Mirror observation.ts — record the event, and fall back to the
     // worker spool only when the failure is transient.
-    const runtime = resolveRuntimeContext();
+    const runtime = resolveRuntimeContext(cwd);
     if (runtime.runtime === 'server') {
       // Worker ingest applies CLAUDE_MEM_SKIP_TOOLS; server events bypass it.
       if (isToolSkipped(FILE_EDIT_TOOL_NAME, loadFromFileOnce().CLAUDE_MEM_SKIP_TOOLS)) {

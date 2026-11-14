@@ -350,7 +350,7 @@ export const contextHandler: EventHandler = {
 
     // A deferred agent install is explicit. A missing setup file on an older
     // installation does not interrupt normal sessions or force onboarding.
-    const runtime = resolveRuntimeContext();
+    const runtime = resolveRuntimeContext(cwd);
     let onboardingNotice: string | null = null;
     if (runtime.runtime === 'worker') {
       try {

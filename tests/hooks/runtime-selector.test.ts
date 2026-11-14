@@ -36,10 +36,15 @@ afterAll(() => {
   mock.module('../../src/utils/logger.js', () => realLoggerSnapshot);
 });
 
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { basename, join } from 'path';
 import {
   resolveRuntimeContext,
   selectRuntime,
   buildServerContext,
+  serverProjectRef,
+  SERVER_PROJECT_NAME_REF_PREFIX,
 } from '../../src/services/hooks/runtime-selector.js';
 
 describe('runtime-selector', () => {
@@ -135,12 +140,26 @@ describe('runtime-selector', () => {
     }
   });
 
-  it('buildServerContext returns null when project id missing on both new and legacy keys', () => {
+  it('buildServerContext names the cwd project when no project id is configured', () => {
+    // Without a project id the hook used to fall back to the local worker
+    // (and its SQLite store). It now names the project its cwd belongs to and
+    // lets the server resolve `name:<project>` to the team's project.
     mockSettings.CLAUDE_MEM_RUNTIME = 'server';
     mockSettings.CLAUDE_MEM_SERVER_URL = 'http://localhost:1234';
     mockSettings.CLAUDE_MEM_SERVER_API_KEY = 'cmem_xyz';
-    expect(buildServerContext()).toBeNull();
-    expect(warnLogs.some(l => l.msg.includes('missing_project_id'))).toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), 'cm-runtime-selector-'));
+    try {
+      const ctx = buildServerContext(dir);
+      expect(ctx).not.toBeNull();
+      expect(ctx!.projectId).toBe(`${SERVER_PROJECT_NAME_REF_PREFIX}${basename(dir)}`);
+      expect(warnLogs.some(l => l.msg.includes('missing_project_id'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an explicit project id wins over the cwd project', () => {
+    expect(serverProjectRef('proj-explicit', '/tmp/anything')).toBe('proj-explicit');
   });
 
 });

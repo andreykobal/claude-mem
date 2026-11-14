@@ -562,13 +562,22 @@ export async function runServerApiKeyCli(argv: string[]): Promise<void> {
       // local team+project, then create a NEW key against those IDs with
       // the caller's requested scopes (the bootstrap key uses hook scopes,
       // which is the wrong default for an arbitrary CLI-issued key).
+      // --team-wide issues a key with no project scope: its holder may name
+      // any project of the team (`projectId: "name:<project>"` creates it on
+      // first write), which is what hooks without CLAUDE_MEM_SERVER_PROJECT_ID
+      // need. --project is refused alongside it rather than silently dropped.
+      const teamWide = options['team-wide'] === true;
+      if (teamWide && options.project) {
+        console.error('--team-wide and --project are mutually exclusive');
+        process.exit(1);
+      }
       let teamId = options.team ?? null;
-      let projectId = options.project ?? null;
-      if (!teamId || !projectId) {
+      let projectId = teamWide ? null : (options.project ?? null);
+      if (!teamId || (!teamWide && !projectId)) {
         const { bootstrapServerApiKey } = await import('../../services/hooks/server-bootstrap.js');
         const result = await bootstrapServerApiKey({ pool, closePool: false });
-        teamId = result.teamId;
-        projectId = result.projectId;
+        teamId = teamId ?? result.teamId;
+        projectId = teamWide ? null : result.projectId;
       }
       const rawKey = `cmem_${randomBytes(24).toString('hex')}`;
       const keyHash = hashApiKey(rawKey);
@@ -804,6 +813,7 @@ interface CliFlagValues {
   offset?: string;
   status?: string;
   active?: boolean;
+  'team-wide'?: boolean;
 }
 
 function parseFlagArgs(argv: string[]): CliFlagValues {
@@ -819,6 +829,7 @@ function parseFlagArgs(argv: string[]): CliFlagValues {
       offset: { type: 'string' },
       status: { type: 'string' },
       active: { type: 'boolean' },
+      'team-wide': { type: 'boolean' },
     },
     strict: false,
     allowPositionals: true,

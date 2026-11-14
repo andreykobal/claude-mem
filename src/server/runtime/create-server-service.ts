@@ -21,6 +21,8 @@ import {
 } from '../services/ObservationEmbeddingService.js';
 import { ClaudeObservationProvider, resolveAnthropicMessagesUrl, type ClaudeObservationProviderOptions } from '../generation/providers/ClaudeObservationProvider.js';
 import { resolveObserverThinkingOption } from '../../sdk/hardened-options.js';
+import { ClaudeSubscriptionObservationProvider, DEFAULT_SERVER_SUBSCRIPTION_MODEL } from '../generation/providers/ClaudeSubscriptionObservationProvider.js';
+import { findClaudeExecutable } from '../../shared/find-claude-executable.js';
 import { ServerClassifiedProviderError } from '../generation/providers/shared/error-classification.js';
 import { GEMINI_API_URL, GeminiObservationProvider } from '../generation/providers/GeminiObservationProvider.js';
 import { OpenRouterObservationProvider } from '../generation/providers/OpenRouterObservationProvider.js';
@@ -506,10 +508,51 @@ export async function instantiateServerGenerationProvider(provider: string): Pro
     if (extraBody) opts.extraBody = extraBody;
     return new OpenRouterObservationProvider(opts);
   }
+  if (provider === 'claude-subscription') {
+    return instantiateClaudeSubscriptionProvider();
+  }
   if (provider === 'custom') {
     return loadCustomServerGenerationProvider();
   }
   return null;
+}
+
+/**
+ * CLAUDE_MEM_SERVER_PROVIDER=claude-subscription: generate through a Claude
+ * subscription (a `claude setup-token` token in CLAUDE_CODE_OAUTH_TOKEN) with
+ * the hardened Agent SDK observer, instead of a per-token API key.
+ * CLAUDE_MEM_SERVER_CLAUDE_PATH names the Claude Code executable; unset, the
+ * usual executable lookup runs. A missing token or executable disables
+ * generation with a warning rather than failing every job.
+ */
+async function instantiateClaudeSubscriptionProvider(): Promise<ServerGenerationProvider | null> {
+  const oauthToken = (process.env.CLAUDE_CODE_OAUTH_TOKEN ?? '').trim();
+  if (!oauthToken) {
+    logger.warn('SYSTEM', 'server: CLAUDE_MEM_SERVER_PROVIDER=claude-subscription requires CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`); generation disabled');
+    return null;
+  }
+  let claudePath = (process.env.CLAUDE_MEM_SERVER_CLAUDE_PATH ?? '').trim();
+  if (!claudePath) {
+    try {
+      claudePath = findClaudeExecutable('SYSTEM');
+    } catch (error) {
+      logger.warn('SYSTEM', 'server: Claude Code executable not found for claude-subscription; set CLAUDE_MEM_SERVER_CLAUDE_PATH. Generation disabled', {}, error instanceof Error ? error : new Error(String(error)));
+      return null;
+    }
+  }
+  if (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_MEM_ANTHROPIC_API_KEY) {
+    // The child never receives it (buildSubscriptionChildEnv), but an operator
+    // who set both should know which one generation uses.
+    logger.info('SYSTEM', 'server: claude-subscription ignores the Anthropic API key; generation uses the subscription token');
+  }
+  const model = (process.env.CLAUDE_MEM_SERVER_MODEL ?? '').trim() || DEFAULT_SERVER_SUBSCRIPTION_MODEL;
+  logger.info('SYSTEM', 'server: generation provider claude-subscription', { model, claudePath });
+  return new ClaudeSubscriptionObservationProvider({
+    oauthToken,
+    claudePath,
+    model,
+    thinking: resolveObserverThinkingOption(process.env.CLAUDE_MEM_OBSERVER_THINKING),
+  });
 }
 
 // Queue manager selection is fail-fast on misconfiguration. If the user

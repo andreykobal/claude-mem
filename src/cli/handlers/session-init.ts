@@ -231,7 +231,7 @@ const sessionInit = {
     const semanticInject =
       String(settings.CLAUDE_MEM_SEMANTIC_INJECT).toLowerCase() === 'true';
 
-    const runtime = dependencies.resolveRuntimeContext();
+    const runtime = dependencies.resolveRuntimeContext(cwd);
     const sessionInitStartedAt = Date.now();
     const sessionInitTimeoutMs = dependencies.getSessionInitRequestTimeoutMs();
     // Phase 1a (cmem-sdk rename): `runtime.runtime` is the canonical `'server'`

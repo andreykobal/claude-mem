@@ -235,7 +235,7 @@ export const summarizeHandler: EventHandler = {
     // is skipped on other platforms.
     const observedBilling = input.platform === 'claude-code' ? detectObservedBilling() : undefined;
 
-    const runtime = resolveRuntimeContext();
+    const runtime = resolveRuntimeContext(input.cwd);
     // Phase 1a (cmem-sdk rename): `runtime.runtime` is the canonical `'server'`
     // value. Legacy `'server-beta'` is normalized inside `selectRuntime()`.
     if (runtime.runtime === 'server') {

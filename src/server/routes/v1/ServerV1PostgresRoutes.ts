@@ -38,6 +38,7 @@ import type { ServerQueueManager } from '../../runtime/types.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createRecallMcpServer, type RecallBackend } from '../../mcp/recall-mcp-server.js';
 import { serverUsageGuards } from '../../middleware/usage-guards.js';
+import { projectNameResolver } from '../../middleware/project-name-resolver.js';
 import { PostgresUsageRepository } from '../../../storage/postgres/usage.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -220,8 +221,19 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     // a middleware array wherever a single handler goes, so the per-route
     // registrations below need no changes. Order after auth: rate limit → quota
     // → meter, so the request is counted only once it's admitted.
-    const writeAuth: RequestHandler[] = [baseWrite, ...serverUsageGuards(this.options.pool, { write: true })];
-    const readAuth: RequestHandler[] = [baseRead, ...serverUsageGuards(this.options.pool)];
+    // After auth and guards: a `projectId: "name:<project>"` body becomes the
+    // team's project id (created on write), so hooks can name the project
+    // their cwd belongs to instead of carrying a server UUID.
+    const writeAuth: RequestHandler[] = [
+      baseWrite,
+      ...serverUsageGuards(this.options.pool, { write: true }),
+      projectNameResolver(this.options.pool, { create: true }),
+    ];
+    const readAuth: RequestHandler[] = [
+      baseRead,
+      ...serverUsageGuards(this.options.pool),
+      projectNameResolver(this.options.pool, { create: false }),
+    ];
     const keyIssuerAuth: RequestHandler[] = [baseKeyIssuer, ...serverUsageGuards(this.options.pool, { write: true })];
 
     // GET /v1/usage — per-kind usage totals for the caller's team this month.

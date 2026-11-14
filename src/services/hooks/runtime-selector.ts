@@ -20,6 +20,7 @@
 import { loadFromFileOnce } from '../../shared/hook-settings.js';
 import { logger } from '../../utils/logger.js';
 import { ServerClient, type ServerClientConfig } from './server-client.js';
+import { getProjectContext } from '../../utils/project-name.js';
 
 export type SelectedRuntime = 'worker' | 'server';
 
@@ -45,7 +46,22 @@ export function selectRuntime(): SelectedRuntime {
   return 'worker';
 }
 
-export function buildServerContext(): ServerRuntimeContext | null {
+/**
+ * The server project a request names. An explicit CLAUDE_MEM_SERVER_PROJECT_ID
+ * wins; otherwise the project the working directory belongs to, named exactly
+ * as the local runtime names it and sent as `name:<project>` for the server to
+ * resolve (src/server/middleware/project-name-resolver.ts), so each checkout
+ * lands in its own server project with no per-repo setting.
+ */
+export function serverProjectRef(explicitProjectId: string, cwd?: string | null): string {
+  if (explicitProjectId) return explicitProjectId;
+  return `${SERVER_PROJECT_NAME_REF_PREFIX}${getProjectContext(cwd || process.cwd()).primary}`;
+}
+
+/** Mirrors PROJECT_NAME_REF_PREFIX on the server; hooks may not import server code. */
+export const SERVER_PROJECT_NAME_REF_PREFIX = 'name:';
+
+export function buildServerContext(cwd?: string | null): ServerRuntimeContext | null {
   const settings = loadFromFileOnce();
   // Phase 1a: read new keys first, fall back to legacy `*_BETA_*` keys so
   // existing settings.json files keep resolving the server runtime.
@@ -67,7 +83,7 @@ export function buildServerContext(): ServerRuntimeContext | null {
     settings.CLAUDE_MEM_SERVER_API_KEY,
     settings.CLAUDE_MEM_SERVER_BETA_API_KEY,
   );
-  const projectId = pickFirstNonEmpty(
+  const explicitProjectId = pickFirstNonEmpty(
     settings.CLAUDE_MEM_SERVER_PROJECT_ID,
     settings.CLAUDE_MEM_SERVER_BETA_PROJECT_ID,
   );
@@ -80,10 +96,7 @@ export function buildServerContext(): ServerRuntimeContext | null {
     logger.warn('HOOK', '[server-fallback] reason=missing_api_key');
     return null;
   }
-  if (!projectId) {
-    logger.warn('HOOK', '[server-fallback] reason=missing_project_id');
-    return null;
-  }
+  const projectId = serverProjectRef(explicitProjectId, cwd);
 
   const config: ServerClientConfig = {
     serverBaseUrl,
@@ -97,11 +110,12 @@ export function buildServerContext(): ServerRuntimeContext | null {
   };
 }
 
-export function resolveRuntimeContext(): RuntimeContext {
+/** `cwd` is the hook's working directory; it picks the server project when none is configured. */
+export function resolveRuntimeContext(cwd?: string | null): RuntimeContext {
   if (selectRuntime() !== 'server') {
     return { runtime: 'worker' };
   }
-  const ctx = buildServerContext();
+  const ctx = buildServerContext(cwd);
   if (!ctx) {
     return { runtime: 'worker' };
   }

@@ -139,6 +139,25 @@ wiring the better-auth org → team mapping is the remaining piece, and the bigg
 part of the devex work still ahead.
 </Warning>
 
+### Hook keys and per-repository projects
+
+An operator with database access can mint a hook key from inside the server
+container:
+
+```bash
+bun /opt/claude-mem/scripts/server-service.cjs server api-key create \
+  --scope memories:read,memories:write --team-wide
+```
+
+`--team-wide` leaves the key without a project scope. A client in
+`CLAUDE_MEM_RUNTIME=server` mode that has no `CLAUDE_MEM_SERVER_PROJECT_ID` then
+sends `projectId: "name:<project>"`, using the project name the local plugin
+would give its working directory, and the server resolves it to the team's
+project of that name: write routes create it on first use, read routes only
+look it up. Each repository on each machine lands in its own project, and the
+same repository on two machines shares one. A project-scoped key never creates
+projects, and an explicit `CLAUDE_MEM_SERVER_PROJECT_ID` always wins.
+
 ## Paid-readiness: rate limiting, quotas, metering
 
 These guards run **after** auth and are **opt-in via environment variables**. Unset
@@ -246,6 +265,27 @@ send its key to that gateway.
 
 A cmem.ai memory key (`cm_pro_…`) is refused on this provider, as the API key
 or inside a custom header; it only works on the cmem.ai gateway.
+
+### Claude subscription provider
+
+With `CLAUDE_MEM_SERVER_PROVIDER=claude-subscription`, the generation worker runs
+the same tool-less observer the local plugin uses (the Claude Agent SDK, one turn,
+no tools, no settings or MCP inheritance) and authenticates it with a Claude
+subscription token instead of an API key. Set these on the generation worker:
+
+| Setting | Description |
+|---------|-------------|
+| `CLAUDE_CODE_OAUTH_TOKEN` | A long-lived token from `claude setup-token`. Required |
+| `CLAUDE_MEM_SERVER_MODEL` | A Claude Code model alias or ID. Defaults to `haiku` |
+| `CLAUDE_MEM_SERVER_CLAUDE_PATH` | The Claude Code executable. Unset, the usual lookup runs; the `docker/railway` image sets it |
+
+The Claude Code child gets only a short allowlist of the worker's environment plus
+the token, so the database and Redis URLs and any `ANTHROPIC_API_KEY` never reach
+it, and it cannot fall back to per-token billing. A spent subscription window
+fails the job as `quota_exhausted` and an expired or revoked token as
+`auth_invalid`; neither is resent, and nothing replays the failed jobs after the
+window resets or the token is replaced. Generation shares the subscription's usage
+limits with your own Claude Code sessions.
 
 ### Custom generation provider (advanced)
 

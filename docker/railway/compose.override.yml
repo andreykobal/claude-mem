@@ -1,0 +1,46 @@
+# Local rehearsal of the Railway stack: the root docker-compose.yml with the
+# Railway image and subscription generation.
+#
+#   POSTGRES_USER=cm POSTGRES_PASSWORD=cm POSTGRES_DB=claude_mem \
+#   CLAUDE_CODE_OAUTH_TOKEN="$(cat ~/.config/claude-mem-server/oauth-token)" \
+#   docker compose -f docker-compose.yml -f docker/railway/compose.override.yml up --build
+#
+# Combined mode (the default here, and what Railway runs): one container serves
+# HTTP and runs generation in the same process, so the embedding model is loaded
+# once instead of in two containers (~0.5 GB less RAM). The split worker is kept
+# behind the `split` profile for comparison:
+#   ... up --build  (combined)   |   ... --profile split up --build  (split)
+#
+# Paths resolve against the repository root (the first compose file's directory).
+services:
+  claude-mem-server:
+    image: claude-mem-railway:local
+    build:
+      context: .
+      dockerfile: docker/railway/Dockerfile
+    environment:
+      CLAUDE_MEM_RUNTIME: server
+      # Combined: this process also consumes the generation queue.
+      CLAUDE_MEM_GENERATION_DISABLED: "false"
+      CLAUDE_MEM_SERVER_PROVIDER: claude-subscription
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      CLAUDE_MEM_SERVER_MODEL: ${CLAUDE_MEM_SERVER_MODEL:-haiku}
+      CLAUDE_MEM_SERVER_GENERATION_CONCURRENCY: "1"
+      # Subscription only: no API key reaches this service.
+      ANTHROPIC_API_KEY: ""
+      CLAUDE_MEM_ANTHROPIC_API_KEY: ""
+
+  claude-mem-worker:
+    profiles: ["split"]
+    image: claude-mem-railway:local
+    build:
+      context: .
+      dockerfile: docker/railway/Dockerfile
+    environment:
+      CLAUDE_MEM_RUNTIME: server
+      CLAUDE_MEM_SERVER_PROVIDER: claude-subscription
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      CLAUDE_MEM_SERVER_MODEL: ${CLAUDE_MEM_SERVER_MODEL:-haiku}
+      CLAUDE_MEM_SERVER_GENERATION_CONCURRENCY: "1"
+      ANTHROPIC_API_KEY: ""
+      CLAUDE_MEM_ANTHROPIC_API_KEY: ""

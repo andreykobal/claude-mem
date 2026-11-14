@@ -929,12 +929,18 @@ async function buildHooks() {
       ],
       define: {
         '__DEFAULT_PACKAGE_VERSION__': `"${version}"`,
-        ...DIRNAME_DEFINE
+        ...DIRNAME_DEFINE,
+        // The claude-subscription generation provider bundles
+        // @anthropic-ai/claude-agent-sdk, whose *.mjs files call
+        // createRequire(import.meta.url) at load time. Same polyfill as the
+        // worker bundle above; without it the server dies on start.
+        'import.meta.url': '__IMPORT_META_URL__'
       },
       banner: {
         js: [
           '#!/usr/bin/env bun',
-          ...DIRNAME_BANNER
+          ...DIRNAME_BANNER,
+          'var __IMPORT_META_URL__ = require("node:url").pathToFileURL(__CM_FILENAME__).href;'
         ].join('\n')
       }
     });
