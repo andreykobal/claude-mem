@@ -243,6 +243,35 @@ export interface ServerSemanticContextResponse {
 }
 
 // Phase 8 — generation job status, scoped by api-key team/project.
+export interface ServerWorkStateEntry {
+  id: number;
+  projectId: string;
+  list: string;
+  fields: Record<string, string | number | boolean | null>;
+  createdAtEpoch: number;
+}
+
+export interface ServerWorkStateWriteRequest {
+  projectId: string;
+  list: string;
+  fields: Record<string, string | number | boolean | null>;
+}
+
+export interface ServerWorkStateWriteResponse {
+  entry: ServerWorkStateEntry;
+  /** Every entry of the written list, in write order. */
+  entries: ServerWorkStateEntry[];
+}
+
+export interface ServerWorkStateReadRequest {
+  projectId: string;
+  list?: string;
+}
+
+export interface ServerWorkStateReadResponse {
+  entries: ServerWorkStateEntry[];
+}
+
 export interface ServerJobStatusResponse {
   generationJob: {
     id: string;
@@ -366,6 +395,26 @@ export class ServerClient {
     }
     if (input.contentSessionId) payload.contentSessionId = input.contentSessionId;
     return this.request<ServerSemanticContextResponse>('POST', '/v1/context/semantic', payload, options);
+  }
+
+  // MCP work_state_write / work_state_read and the SessionStart work-state
+  // section in server runtime. The server stores ordered writes; callers fold
+  // and render them with WorkStateRenderer.
+  async appendWorkStateEntry(input: ServerWorkStateWriteRequest): Promise<ServerWorkStateWriteResponse> {
+    return this.request<ServerWorkStateWriteResponse>('POST', '/v1/work-state/entries', {
+      projectId: input.projectId,
+      list: input.list,
+      fields: input.fields,
+    });
+  }
+
+  async readWorkStateEntries(
+    input: ServerWorkStateReadRequest,
+    options: ServerRequestOptions = {},
+  ): Promise<ServerWorkStateReadResponse> {
+    const payload: Record<string, unknown> = { projectId: input.projectId };
+    if (input.list !== undefined) payload.list = input.list;
+    return this.request<ServerWorkStateReadResponse>('POST', '/v1/work-state/read', payload, options);
   }
 
   // Phase 8 — MCP `observation_generation_status`. Server returns the same

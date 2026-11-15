@@ -26,7 +26,7 @@ import { SessionsSummarizeAdapter } from '../compat/SessionsSummarizeAdapter.js'
 import { ActiveServerQueueManager } from './ActiveServerQueueManager.js';
 import { getVectorSearchStatus } from '../services/ObservationEmbeddingService.js';
 import { ServerViewerRoutes } from './ServerViewerRoutes.js';
-import type { ServerServiceGraph, ServerQueueLaneMetric } from './types.js';
+import type { ServerBoundaryHealth, ServerServiceGraph, ServerQueueLaneMetric } from './types.js';
 
 // Phase 1d retains the persisted runtime literal `'server-beta'`. Renaming the
 // constant here keeps the TS identifier modern while preserving wire/storage
@@ -146,8 +146,10 @@ export class ServerService {
       },
       workerPath: '',
       runtime: SERVER_RUNTIME,
+      // The provider that generates observations in this process, or
+      // 'disabled' when generation is off here (HTTP-only container).
       getAiStatus: () => ({
-        provider: 'disabled',
+        provider: generationProviderLabel(this.graph.generationWorkerManager.getHealth()),
         authMethod: this.graph.authMode,
         lastInteraction: null,
       }),
@@ -293,6 +295,12 @@ export class ServerService {
       },
     };
   }
+}
+
+/** The generation provider /api/health reports: its label while generation runs here, else 'disabled'. */
+export function generationProviderLabel(health: ServerBoundaryHealth): string {
+  const provider = health.details?.provider;
+  return health.status === 'active' && typeof provider === 'string' && provider.length > 0 ? provider : 'disabled';
 }
 
 function resolveBoundPort(server: Server): number | null {

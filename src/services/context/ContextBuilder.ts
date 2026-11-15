@@ -66,6 +66,7 @@ import { cooldownAppliesToCurrentAccount } from '../../shared/quota-cooldown.js'
 import { readSyncHealth, renderSyncHealthWarning } from '../../shared/sync-health.js';
 import { resolveRuntimeContext, type ServerRuntimeContext } from '../hooks/runtime-selector.js';
 import { fetchServerContextRows, type ServerContextRows } from './ServerContextRows.js';
+import { readServerWorkStateSection } from './ServerWorkState.js';
 import { ModeManager } from '../domain/ModeManager.js';
 import { getContextReadWorker } from './ContextReadWorkerClient.js';
 import type { ContextReadOptions, ContextReadResult } from './ContextReadProtocol.js';
@@ -646,11 +647,19 @@ export async function generateServerContextWithStats(
 export async function generateServerSessionStartContext(
   runtime: ServerRuntimeContext,
   input: ContextInput,
-  options: { withTerminalRender: boolean; timeoutMs: number },
+  options: { withTerminalRender: boolean; timeoutMs: number; workState?: boolean },
 ): Promise<{ model: string; terminal: string | null }> {
-  const read = await readServerContext(runtime, input, options.timeoutMs);
+  // The open work-state lists go in the model block only, as the worker's
+  // /api/context/inject puts them; read alongside the rows, not after them.
+  const [read, workStateSection] = await Promise.all([
+    readServerContext(runtime, input, options.timeoutMs),
+    options.workState
+      ? readServerWorkStateSection(runtime, resolveContextScope(input).project, options.timeoutMs)
+      : Promise.resolve(''),
+  ]);
+  const modelInput = workStateSection ? { ...input, workStateSection } : input;
   return {
-    model: renderServerContext(read, input, false).text,
+    model: renderServerContext(read, modelInput, false).text,
     terminal: options.withTerminalRender ? renderServerContext(read, input, true).text : null,
   };
 }

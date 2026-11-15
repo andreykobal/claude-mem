@@ -40,6 +40,8 @@ import { createRecallMcpServer, type RecallBackend } from '../../mcp/recall-mcp-
 import { serverUsageGuards } from '../../middleware/usage-guards.js';
 import { projectNameResolver } from '../../middleware/project-name-resolver.js';
 import { PostgresUsageRepository } from '../../../storage/postgres/usage.js';
+import { PostgresWorkStateRepository, type PostgresWorkStateEntry } from '../../../storage/postgres/work-state.js';
+import { workStateListSchema, workStateWriteFieldsSchema, workStateWriteRefusal } from '../../../shared/work-state-write.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { apiKeyPrefix, hashApiKeyAsync } from '../../auth/api-key-hash.js';
@@ -1217,6 +1219,71 @@ export class ServerV1PostgresRoutes implements RouteHandler {
       },
     ));
 
+    // The agent's to-do lists and working state (work_state_write /
+    // work_state_read in server runtime). The server stores the ordered
+    // writes; the client folds and renders them with the same
+    // WorkStateRenderer the local store uses, so both runtimes answer alike.
+    // A write answers with the list's entries so the client can say what is
+    // still open without a second request.
+    app.post('/v1/work-state/entries', writeAuth, this.handleCreate(
+      z.object({
+        projectId: z.string().min(1),
+        list: workStateListSchema,
+        fields: workStateWriteFieldsSchema,
+      }),
+      async (req, res, body) => {
+        const teamId = this.requireTeamId(req, res);
+        if (!teamId) return;
+        if (!this.ensureProjectAllowed(req, res, body.projectId)) return;
+        const refusal = workStateWriteRefusal(body.list, body.fields);
+        if (refusal) {
+          res.status(refusal.status).json({ error: refusal.status === 403 ? 'Forbidden' : 'BadRequest', message: refusal.message });
+          return;
+        }
+        try {
+          // A team-wide key names any project id; only its own team's may take a row.
+          // 404 rather than 403, so another team's project ids are not confirmed.
+          const project = await new PostgresProjectsRepository(this.options.pool).getByIdForTeam(body.projectId, teamId);
+          if (!project) {
+            res.status(404).json({ error: 'NotFound', message: 'project not found' });
+            return;
+          }
+          const repo = new PostgresWorkStateRepository(this.options.pool);
+          const entry = await repo.append({ teamId, projectId: body.projectId, listName: body.list, fields: body.fields });
+          const entries = await repo.list({ teamId, projectId: body.projectId, listName: body.list });
+          await this.auditWrite(req, 'work_state.write', String(entry.id), body.projectId, { list: body.list });
+          res.status(201).json({ entry: serializeWorkStateEntry(entry), entries: entries.map(serializeWorkStateEntry) });
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          logger.warn('SYSTEM', 'work_state.write failed', { requestId: req.requestId ?? null }, err);
+          this.handleDbError(err, res, 'work_state.write');
+        }
+      },
+    ));
+
+    // A read names the project in the body like the other read routes, so a
+    // `name:<project>` reference resolves (and an unknown one reads empty).
+    app.post('/v1/work-state/read', readAuth, this.handleCreate(
+      z.object({
+        projectId: z.string().min(1),
+        list: z.string().trim().min(1).max(200).optional(),
+      }),
+      async (req, res, body) => {
+        const teamId = this.requireTeamId(req, res);
+        if (!teamId) return;
+        if (!this.ensureProjectAllowed(req, res, body.projectId)) return;
+        try {
+          const entries = await new PostgresWorkStateRepository(this.options.pool)
+            .list({ teamId, projectId: body.projectId, ...(body.list ? { listName: body.list } : {}) });
+          res.status(200).json({ entries: entries.map(serializeWorkStateEntry) });
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          logger.warn('SYSTEM', 'work_state.read failed', { requestId: req.requestId ?? null }, err);
+          this.handleDbError(err, res, 'work_state.read');
+        }
+      },
+    ));
+
     // Per-prompt injection: observations near a user prompt in meaning,
     // rendered as the worker's /api/context/semantic renders them, so the
     // session-init hook can treat either runtime's answer alike. Prompts under
@@ -2203,6 +2270,16 @@ function serializeJobListEntry(
 // can group/filter consistently. We map the dotted action name to a canonical
 // resource_type keyword. Unknown actions fall back to the prefix (matches the
 // previous behavior for backward compatibility).
+function serializeWorkStateEntry(entry: PostgresWorkStateEntry) {
+  return {
+    id: entry.id,
+    projectId: entry.projectId,
+    list: entry.listName,
+    fields: entry.fields,
+    createdAtEpoch: entry.createdAtEpoch,
+  };
+}
+
 function resolveAuditResourceType(action: string): string {
   const map: Record<string, string> = {
     'event.received': 'agent_event',
@@ -2212,6 +2289,7 @@ function resolveAuditResourceType(action: string): string {
     'session.write': 'server_session',
     'session.end': 'server_session',
     'memory.write': 'observation',
+    'work_state.write': 'work_state_entry',
     'observation.read': 'observation',
     'observation.search': 'observation',
     'observation.context': 'observation',

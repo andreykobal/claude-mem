@@ -8,56 +8,24 @@ import { SettingsDefaultsManager } from '../../../../shared/SettingsDefaultsMana
 import { USER_SETTINGS_PATH } from '../../../../shared/paths.js';
 import { getProjectContext } from '../../../../utils/project-name.js';
 import { logger } from '../../../../utils/logger.js';
-import type { WorkStateFields } from '../../../sqlite/work-state.js';
-import { isMyRulesList } from '../../../work-view/my-rules.mjs';
-import { isForeignBrowserRead, isForeignLoopbackBrowserWrite } from './SettingsRoutes.js';
-import { isMyFocusList } from '../../../work-view/my-focus.mjs';
-import { GOAL_KINDS, isOwnerGoalsList } from '../../../work-view/owner-goals.mjs';
-import { MAX_WORK_STATE_FIELDS_JSON_CHARS } from '../../../work-view/work-state-limits.mjs';
-import { isSharedWorkList } from '../../../work-view/shared-records.mjs';
-import { isClosedWorkStateStatus } from '../../../work-view/work-state-status.mjs';
 import {
-  fitWorkStateLines,
-  renderWorkStateLines,
-  WORK_STATE_SECTION_CHARACTER_LIMIT,
-} from '../../../context/sections/WorkStateRenderer.js';
+  MAX_WORK_STATE_FIELDS_JSON_CHARS,
+  ownerGoalsRowRefusal,
+  workStateListSchema,
+  workStateWriteFieldsSchema,
+  workStateReadReply,
+  workStateWriteRefusal,
+  workStateWriteReply,
+} from '../../../../shared/work-state-write.js';
+import { isForeignBrowserRead, isForeignLoopbackBrowserWrite } from './SettingsRoutes.js';
 
-export { MAX_WORK_STATE_FIELDS_JSON_CHARS };
-
-// z.record intentionally drops __proto__; here every field is a primitive,
-// so validate own entries and copy with spread to keep literal data keys safely.
-// An integer past 2^53 cannot cross cloud sync's canonical JSON
-// (CanonicalContent), so it is refused here instead of quarantined later.
-const workStateFieldsSchema = z.custom<WorkStateFields>(value =>
-  value !== null && typeof value === 'object' && !Array.isArray(value)
-    && Object.entries(value).every(([key, field]) => key.length > 0 && (
-      field === null || typeof field === 'string' || typeof field === 'boolean'
-      || (typeof field === 'number' && Number.isFinite(field) && (!Number.isInteger(field) || Number.isSafeInteger(field)))
-    )),
-  'fields must map non-empty keys to strings, safe finite numbers, booleans or null',
-).transform(fields => ({ ...fields }));
+export { MAX_WORK_STATE_FIELDS_JSON_CHARS, ownerGoalsRowRefusal };
 
 const workStateWriteSchema = z.object({
   cwd: z.string().refine(cwd => cwd.trim().length > 0, 'cwd is required'),
-  list: z.string().trim().min(1).max(200).refine(list => !isSharedWorkList(list), 'This list is reserved for shared My Work records'),
-  fields: workStateFieldsSchema
-    .refine(fields => Object.keys(fields).length > 0, 'fields must set at least one key')
-    .refine(
-      fields => JSON.stringify(fields).length <= MAX_WORK_STATE_FIELDS_JSON_CHARS,
-      `fields must be at most ${MAX_WORK_STATE_FIELDS_JSON_CHARS} characters as JSON`,
-    ),
+  list: workStateListSchema,
+  fields: workStateWriteFieldsSchema,
 });
-
-/** Why an owner-goals row cannot be saved, or null. List state rows and a row that only closes an item need no kind. */
-export function ownerGoalsRowRefusal(fields: WorkStateFields): string | null {
-  if (fields.task == null || fields.task === '') return null;
-  const onlyCloses = Object.keys(fields).every(key => key === 'task' || key === 'status') && isClosedWorkStateStatus(fields.status);
-  if (onlyCloses && !('goal_kind' in fields)) return null;
-  if (!(GOAL_KINDS as unknown[]).includes(fields.goal_kind)) {
-    return `an owner-goals item needs goal_kind ${GOAL_KINDS.map(kind => `"${kind}"`).join(' or ')}; got ${JSON.stringify(fields.goal_kind ?? null)}.`;
-  }
-  return null;
-}
 
 /**
  * Surface for `work_state_entries`, the agent's canonical to-do lists and
@@ -95,24 +63,10 @@ export class WorkStateRoutes extends BaseRouteHandler {
       return;
     }
 
-    // My Rules rows become the user-level CLAUDE.md import (MY-RULES.md), so they are written only by the
-    // origin-checked /api/work-view/rules handler, never by an agent session or another local page.
-    if (isMyRulesList(list)) {
-      res.status(403).send(`Not saved: "${list}" is written only from My Rules in the claude-mem viewer.`);
-      return;
-    }
-    // My Focus rows are the owner's areas and placements; only the origin-checked /api/work-view/focus handler writes them.
-    if (isMyFocusList(list)) {
-      res.status(403).send(`Not saved: "${list}" is written only from My Focus in the claude-mem viewer.`);
-      return;
-    }
-
-    // Goals rows are validated, not blocked: save_goals.py writes them here. An item of a kind My Work cannot read
-    // would stop the whole view (the reader throws rather than guess), so it is refused at the door.
-    if (isOwnerGoalsList(list)) {
-      const refusal = ownerGoalsRowRefusal(fields);
-      if (refusal) { res.status(400).send(`Not saved: ${refusal}`); return; }
-    }
+    // My Rules and My Focus rows are written only by the origin-checked
+    // /api/work-view handlers; owner-goals items must name a kind My Work reads.
+    const refusal = workStateWriteRefusal(list, fields);
+    if (refusal) { res.status(refusal.status).send(refusal.message); return; }
 
     const checkout = getProjectContext(cwd);
     const store = this.dbManager.getSessionStore();
@@ -120,13 +74,8 @@ export class WorkStateRoutes extends BaseRouteHandler {
     logger.debug('WORKER', 'Work state entry saved', { project: checkout.primary, list });
     // The row is a `work_state` sync op: nudge the push drain (null when sync is off).
     this.dbManager.getCloudSync()?.notify();
-    // Only what is still open, cut like the SessionStart section, so a long-kept
-    // list does not repeat its closed items on every write.
-    const openLines = renderWorkStateLines(store.getWorkStateEntries(checkout.allProjects, list), Date.now());
-    const saved = `Saved to "${list}" in ${checkout.primary}.`;
-    res.send(openLines.length > 0
-      ? fitWorkStateLines(`${saved} Still open in it:`, openLines, WORK_STATE_SECTION_CHARACTER_LIMIT)
-      : `${saved} Nothing in it is open now.`);
+    // Only what is still open, so a long-kept list does not repeat its closed items on every write.
+    res.send(workStateWriteReply(store.getWorkStateEntries(checkout.allProjects, list), list, checkout.primary, Date.now()));
   });
 
   private handleRead = (exportHistory = false) => this.wrapHandler((req: Request, res: Response): void => {
@@ -156,15 +105,7 @@ export class WorkStateRoutes extends BaseRouteHandler {
       res.json({ version: 1, project: checkout.primary, projects: checkout.allProjects, list: list ?? null, entries });
       return;
     }
-    const lines = renderWorkStateLines(entries, Date.now(), includeClosed);
-
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    if (lines.length > 0) {
-      res.send(lines.join('\n'));
-    } else if (includeClosed) {
-      res.send(`Nothing recorded${list ? ` in "${list}"` : ''} for ${checkout.primary}.`);
-    } else {
-      res.send(`Nothing open${list ? ` in "${list}"` : ''} for ${checkout.primary}. Pass includeClosed to see closed items.`);
-    }
+    res.send(workStateReadReply(entries, { list, includeClosed, project: checkout.primary, nowEpoch: Date.now() }));
   });
 }

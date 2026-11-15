@@ -2,6 +2,15 @@ import { randomUUID } from 'crypto';
 import { spoolHookEvent } from './spool-hook-event.js';
 import { resolveTelemetryConsent, loadTelemetryConfig } from '../services/telemetry/consent.js';
 import { workStateOutcome, workStateTool } from '../shared/work-state-telemetry.js';
+import { selectRuntime } from '../services/hooks/runtime-selector.js';
+
+/**
+ * Only the local worker drains the hook spool. In server runtime none runs, so
+ * a spooled count would sit on disk and each one would knock on a dead port.
+ */
+function spoolDrained(): boolean {
+  return selectRuntime() !== 'server';
+}
 
 const mcpProcessId = randomUUID();
 
@@ -13,7 +22,7 @@ const mcpProcessId = randomUUID();
  */
 export function spoolWorkStateMcpInstruction(workStateRuleIncluded: boolean): void {
   try {
-    if (!resolveTelemetryConsent(process.env, loadTelemetryConfig())) return;
+    if (!spoolDrained() || !resolveTelemetryConsent(process.env, loadTelemetryConfig())) return;
     spoolHookEvent('work_state_telemetry', {
       kind: 'instruction', contentSessionId: mcpProcessId, platformSource: 'unknown',
       state: workStateRuleIncluded ? 'returned' : 'disabled', eventId: randomUUID(),
@@ -24,7 +33,7 @@ export function spoolWorkStateMcpInstruction(workStateRuleIncluded: boolean): vo
 export function spoolWorkStateMcpResult(name: string, result: unknown): void {
   try {
     const tool = workStateTool(name);
-    if (!tool || tool === 'native_todo' || !resolveTelemetryConsent(process.env, loadTelemetryConfig())) return;
+    if (!tool || tool === 'native_todo' || !spoolDrained() || !resolveTelemetryConsent(process.env, loadTelemetryConfig())) return;
     spoolHookEvent('work_state_telemetry', {
       kind: 'mcp', contentSessionId: mcpProcessId, platformSource: 'unknown',
       eventId: randomUUID(), tool, outcome: workStateOutcome(tool, result),

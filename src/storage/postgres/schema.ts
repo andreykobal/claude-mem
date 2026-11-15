@@ -22,7 +22,8 @@ export const SERVER_POSTGRES_TABLES = [
   'observation_sources',
   'observation_generation_job_events',
   'usage_events',
-  'rate_limit_counters'
+  'rate_limit_counters',
+  'work_state_entries'
 ] as const;
 
 /**
@@ -513,6 +514,22 @@ CREATE TABLE IF NOT EXISTS rate_limit_counters (
   PRIMARY KEY (subject_id, window_start)
 );
 CREATE INDEX IF NOT EXISTS idx_rate_limit_counters_window ON rate_limit_counters(window_start);
+
+-- The agent's to-do lists and working state (work_state_write), one row per
+-- write, replayed in id order with the latest value of each key winning, as
+-- in the local store (src/services/sqlite/work-state.ts). fields is the JSON
+-- text as written: JSONB would reorder its keys, and the detail line keeps
+-- the order the agent gave.
+CREATE TABLE IF NOT EXISTS work_state_entries (
+  id BIGSERIAL PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  team_id TEXT NOT NULL,
+  list_name TEXT NOT NULL,
+  fields TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (project_id, team_id) REFERENCES projects(id, team_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_work_state_entries_scope ON work_state_entries(team_id, project_id, list_name, id);
 `;
 
 // One vector per part of an observation (narrative, legacy text, each fact,

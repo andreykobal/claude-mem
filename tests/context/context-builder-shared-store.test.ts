@@ -323,6 +323,45 @@ describe('session-start context from the shared store', () => {
     expect(terminal).toBeNull();
   });
 
+  it('puts the open work-state lists from the store in the model block only', async () => {
+    respond = async () => ({ observations: [observationRow(1)] });
+    const workStateCalls: Array<Record<string, unknown>> = [];
+    const runtime = serverRuntime() as any;
+    runtime.client.readWorkStateEntries = async (request: Record<string, unknown>) => {
+      workStateCalls.push(request);
+      return {
+        entries: [
+          { id: 1, projectId: 'demo-project', list: 'release', fields: { task: 'Tag the build', status: 'doing' }, createdAtEpoch: 1_760_000_000_000 },
+          { id: 2, projectId: 'demo-project', list: 'release', fields: { task: 'Old step', status: 'done' }, createdAtEpoch: 1_760_000_000_001 },
+        ],
+      };
+    };
+    const { model, terminal } = await generateServerSessionStartContext(runtime, input, {
+      withTerminalRender: true,
+      timeoutMs: 12_000,
+      workState: true,
+    });
+    expect(workStateCalls).toEqual([{ projectId: 'demo-project' }]);
+    expect(model).toContain('Work state, still open:');
+    expect(model).toContain('Tag the build');
+    expect(model).not.toContain('Old step');
+    expect(model).toContain('Observation 1');
+    expect(terminal).not.toContain('Tag the build');
+  });
+
+  it('leaves work state out, and the rest in, when the store cannot answer for it', async () => {
+    respond = async () => ({ observations: [observationRow(1)] });
+    const runtime = serverRuntime() as any;
+    runtime.client.readWorkStateEntries = async () => { throw new Error('unreachable'); };
+    const { model } = await generateServerSessionStartContext(runtime, input, {
+      withTerminalRender: false,
+      timeoutMs: 12_000,
+      workState: true,
+    });
+    expect(model).toContain('Observation 1');
+    expect(model).not.toContain('Work state');
+  });
+
   it('never consults the store in worker runtime', async () => {
     runtimeStub = { runtime: 'worker' };
     await generateContextWithStats(input);

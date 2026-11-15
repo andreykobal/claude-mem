@@ -72,6 +72,10 @@ import { withWorkerRestartOnRefusedConnection } from './worker-restart.js';
 import { ProgressiveSearchError, progressiveSearchToolError } from '../shared/progressive-search.js';
 import { formatMcpPayload, formatWorkerMcpResponse, formatWorkStateMcpResponse, mcpTextResult, workerFailureText, serverFailureText, type McpTextPurpose } from './mcp-text-format.js';
 import { getRequestCwd, runWithCwd } from './request-context.js';
+import { isProjectExcluded } from '../utils/project-filter.js';
+import { workStateReadReply, workStateWriteRefusal, workStateWriteReply } from '../shared/work-state-write.js';
+import { readServerWorkStateSection, toWorkStateEntries } from '../services/context/ServerWorkState.js';
+import { SERVER_PROJECT_NAME_REF_PREFIX } from '../services/hooks/runtime-selector.js';
 import { parseHttpArgs, startMcpHttpServer, type CwdResolver, type McpHttpOptions } from './mcp-http.js';
 import { createStdioCwdResolver } from './mcp-project-cwd.js';
 import { buildWorkerOriginPolicy } from '../services/worker/http/origin-policy.js';
@@ -456,6 +460,8 @@ async function handleSessionStartContext(
     };
   }
 
+  if (selectRuntime() === 'server') return serverSessionStartContext(args, projects);
+
   return callWorker('/api/context/inject', {
     query: {
       projects: projectsQueryValues(projects),
@@ -465,6 +471,105 @@ async function handleSessionStartContext(
     },
     text: true,
   });
+}
+
+/**
+ * session_start_context in server runtime: the open work-state lists and the
+ * project's most recent observations, both read from the server. This process
+ * runs under Node and cannot load the SQLite-backed SessionStart renderer, so
+ * the rows come as observation_context shows them; the SessionStart hook
+ * itself renders the full block. No local worker is asked.
+ */
+async function serverSessionStartContext(
+  args: SessionStartContextArgs,
+  projects: string[],
+): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  const project = projects[projects.length - 1];
+  const runtime = serverContextForProject(project);
+  if (!runtime) return mcpTextResult(serverConfigIncompleteText('session_start_context'), true);
+  try {
+    const platformSource = args.platformSource ? normalizeMcpPlatformSource(args.platformSource) : undefined;
+    const [workStateSection, recent] = await Promise.all([
+      workStateEnabled() ? readServerWorkStateSection(runtime, project) : Promise.resolve(''),
+      runtime.client.contextObservations({
+        projectId: runtime.projectId,
+        ...(platformSource !== undefined ? { platformSource } : {}),
+      }),
+    ]);
+    const observations = (recent?.observations?.length ?? 0) > 0
+      ? formatMcpPayload('context', recent).content[0].text
+      : `No observations stored for ${project} yet.`;
+    return mcpTextResult([workStateSection, observations].filter(Boolean).join('\n\n'));
+  } catch (error) {
+    return formatToolError(error);
+  }
+}
+
+/**
+ * The server context for a project name: the configured server project when
+ * CLAUDE_MEM_SERVER_PROJECT_ID is set, otherwise `name:<project>`, the
+ * reference the hooks send for the same checkout.
+ */
+function serverContextForProject(project: string): ServerRuntimeContext | null {
+  const ctx = buildServerContext(getRequestCwd());
+  if (!ctx) return null;
+  return ctx.projectId.startsWith(SERVER_PROJECT_NAME_REF_PREFIX)
+    ? { ...ctx, projectId: `${SERVER_PROJECT_NAME_REF_PREFIX}${project}` }
+    : ctx;
+}
+
+function serverConfigIncompleteText(toolName: string): string {
+  return `${toolName}: server runtime is selected but CLAUDE_MEM_SERVER_URL or CLAUDE_MEM_SERVER_API_KEY is missing in ~/.claude-mem/settings.json.`;
+}
+
+/** A server refusal (bad fields, a viewer-only list) reads as the server's own words; anything else as a server failure. */
+function workStateServerError(error: unknown): { content: Array<{ type: 'text'; text: string }>; isError: true } {
+  if (isServerClientError(error) && (error.status === 400 || error.status === 403)) {
+    return { content: mcpTextResult(error.message).content, isError: true };
+  }
+  return formatToolError(error);
+}
+
+/** work_state_write in server runtime: the row goes to the server project this checkout's hooks write to. */
+async function serverWorkStateWrite(args: { list?: unknown; fields?: unknown }) {
+  const cwd = getRequestCwd();
+  const checkout = getProjectContext(cwd);
+  if (isProjectExcluded(cwd, loadFromFileOnce().CLAUDE_MEM_EXCLUDED_PROJECTS)) {
+    return mcpTextResult('Not saved: this project is excluded from claude-mem (CLAUDE_MEM_EXCLUDED_PROJECTS).');
+  }
+  const list = typeof args?.list === 'string' ? args.list.trim() : '';
+  const fields = (args?.fields ?? {}) as Record<string, string | number | boolean | null>;
+  if (!list) return mcpTextResult('Not saved: "list" is required.', true);
+  // Answered here as the worker answers it; the server checks the same rule.
+  const refusal = workStateWriteRefusal(list, fields);
+  if (refusal) return mcpTextResult(refusal.message, true);
+  const runtime = serverContextForProject(checkout.primary);
+  if (!runtime) return mcpTextResult(serverConfigIncompleteText('work_state_write'), true);
+  try {
+    const { entries } = await runtime.client.appendWorkStateEntry({ projectId: runtime.projectId, list, fields });
+    return mcpTextResult(workStateWriteReply(toWorkStateEntries(entries ?? [], checkout.primary), list, checkout.primary, Date.now()));
+  } catch (error) {
+    return workStateServerError(error);
+  }
+}
+
+/** work_state_read in server runtime. */
+async function serverWorkStateRead(args: { list?: unknown; includeClosed?: unknown }) {
+  const checkout = getProjectContext(getRequestCwd());
+  const list = typeof args?.list === 'string' && args.list.trim() ? args.list.trim() : undefined;
+  const runtime = serverContextForProject(checkout.primary);
+  if (!runtime) return mcpTextResult(serverConfigIncompleteText('work_state_read'), true);
+  try {
+    const { entries } = await runtime.client.readWorkStateEntries({ projectId: runtime.projectId, ...(list ? { list } : {}) });
+    return formatWorkStateMcpResponse(workStateReadReply(toWorkStateEntries(entries ?? [], checkout.primary), {
+      list,
+      includeClosed: args?.includeClosed === true,
+      project: checkout.primary,
+      nowEpoch: Date.now(),
+    }));
+  } catch (error) {
+    return workStateServerError(error);
+  }
 }
 
 const handleObservationGenerationStatus = wrapHandler('observation_generation_status', async (args: ObservationGenerationStatusArgs) => {
@@ -765,7 +870,7 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
       required: ['list', 'fields'],
       additionalProperties: false,
     },
-    handler: async (args: any) => callWorker('/api/work-state/entries', {
+    handler: async (args: any) => selectRuntime() === 'server' ? serverWorkStateWrite(args) : callWorker('/api/work-state/entries', {
       body: { cwd: getRequestCwd(), list: args?.list, fields: args?.fields },
       text: true,
     }),
@@ -782,7 +887,7 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
       additionalProperties: false,
     },
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
-    handler: async (args: any) => callWorker('/api/work-state', {
+    handler: async (args: any) => selectRuntime() === 'server' ? serverWorkStateRead(args) : callWorker('/api/work-state', {
       query: { cwd: getRequestCwd(), list: args?.list, includeClosed: args?.includeClosed },
       text: true,
     }),

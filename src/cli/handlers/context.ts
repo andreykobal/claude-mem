@@ -36,6 +36,7 @@ import {
 import { resolveRuntimeContext, type ServerRuntimeContext } from '../../services/hooks/runtime-selector.js';
 import type { ContextInput } from '../../services/context/types.js';
 import { serverSessionStartBudgetMs } from '../../shared/host-hook-limits.js';
+import { isWorkStateEnabled } from '../../shared/work-state-setting.js';
 import { contextCacheKeys, fillContextPlaceholders, readContextCache } from '../../shared/context-cache.js';
 import { clearTimelinePending } from '../../shared/codex-compaction-gate.js';
 import { readSetupState, type SetupStateFile } from '../../shared/setup-state.js';
@@ -253,6 +254,7 @@ async function renderSessionStartFromServer(
   withColoredTerminalRender: boolean,
   modeId: string,
   host: string | undefined,
+  workState: boolean,
 ): Promise<{ model: string; terminal: string }> {
   const [{ generateServerSessionStartContext }, { ModeManager }] = await Promise.all([
     import('../../services/context/ContextBuilder.js'),
@@ -265,6 +267,7 @@ async function renderSessionStartFromServer(
   const { model, terminal } = await generateServerSessionStartContext(runtime, contextInput, {
     withTerminalRender: withColoredTerminalRender,
     timeoutMs: serverSessionStartBudgetMs(host),
+    workState,
   });
   return { model, terminal: terminal ?? model };
 }
@@ -484,6 +487,8 @@ export const contextHandler: EventHandler = {
           showTerminalOutput && input.platform === 'claude-code',
           settings.CLAUDE_MEM_MODE,
           input.platform,
+          // CLAUDE_MEM_WORK_STATE_ENABLED=false (#4606): env first, as the worker reads it.
+          isWorkStateEnabled(process.env.CLAUDE_MEM_WORK_STATE_ENABLED ?? settings.CLAUDE_MEM_WORK_STATE_ENABLED),
         )
       : null;
 
