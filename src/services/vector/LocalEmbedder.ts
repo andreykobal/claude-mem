@@ -1,4 +1,5 @@
 import type { Embedder } from './types.js';
+import { effectiveCpuCount } from '../../shared/cpu-quota.js';
 import { DEFAULT_EMBEDDING_MODEL, type EmbeddingModel } from './models.js';
 
 /**
@@ -48,8 +49,10 @@ export class LocalEmbedder implements Embedder {
   private failed: { error: unknown; at: number } | null = null;
 
   /**
-   * `threads` caps onnxruntime's intra-op threads; unset, it takes every CPU
-   * thread. Fixed when the model loads.
+   * `threads` caps onnxruntime's intra-op threads; unset, it takes the CPUs
+   * this process may use (the container's quota, not the host's threads:
+   * 48 threads on a 1-vCPU container kept it throttled and starved the
+   * server's event loop). Fixed when the model loads.
    */
   constructor(
     private readonly model: EmbeddingModel = DEFAULT_EMBEDDING_MODEL,
@@ -76,7 +79,7 @@ export class LocalEmbedder implements Embedder {
           tokenizer: await AutoTokenizer.from_pretrained(this.model.repo),
           model: await AutoModel.from_pretrained(this.model.repo, {
             dtype: this.model.dtype,
-            ...(this.threads ? { session_options: { intraOpNumThreads: this.threads } } : {}),
+            session_options: { intraOpNumThreads: this.threads || effectiveCpuCount() },
           }),
         };
         return this.extractor;

@@ -25,7 +25,7 @@ import { UNBINDABLE_PORT_REMEDIATION } from '../shared/connection-errors.js';
 import { acquireSpawnLock, releaseSpawnLock } from '../shared/worker-spawn-gate.js';
 import { isPidAlive } from '../supervisor/process-registry.js';
 import { reclaimGhostListeningPort } from '../shared/port-reclaim.js';
-import { isWorkerAutostartDisabled } from '../shared/worker-autostart.js';
+import { isLocalWorkerLaunchDisabled } from '../shared/worker-autostart.js';
 import { InvalidWorkerUrlError, normalizeWorkerBaseUrl } from '../shared/worker-url.js';
 
 /**
@@ -201,7 +201,7 @@ export async function ensureWorkerStarted(
   // alone). Read fresh: this runs in long-lived processes (the MCP server).
   const settingsPath = path.join(SettingsDefaultsManager.get('CLAUDE_MEM_DATA_DIR'), 'settings.json');
   const settings = SettingsDefaultsManager.loadFromFile(settingsPath);
-  if (isWorkerAutostartDisabled(settings)) {
+  if (isLocalWorkerLaunchDisabled(settings)) {
     let explicitWorkerOrigin: string | undefined;
     try {
       explicitWorkerOrigin = normalizeWorkerBaseUrl(settings.CLAUDE_MEM_WORKER_URL) || undefined;

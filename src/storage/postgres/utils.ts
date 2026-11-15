@@ -105,3 +105,22 @@ function sortJson(value: unknown): unknown {
   }
   return value;
 }
+
+/**
+ * JSON text Postgres accepts as jsonb: NUL (U+0000) removed from every string
+ * and key. jsonb, like text, cannot hold it ("unsupported Unicode escape
+ * sequence"), and a tool output carrying one, binary read as text, failed the
+ * whole event insert.
+ */
+export function toPostgresJson(value: unknown): string {
+  return JSON.stringify(stripNul(value));
+}
+
+function stripNul(node: unknown): unknown {
+  if (typeof node === 'string') return node.includes('\u0000') ? node.replaceAll('\u0000', '') : node;
+  if (Array.isArray(node)) return node.map(stripNul);
+  if (node !== null && typeof node === 'object' && !(node instanceof Date)) {
+    return Object.fromEntries(Object.entries(node).map(([key, child]) => [stripNul(key) as string, stripNul(child)]));
+  }
+  return node;
+}

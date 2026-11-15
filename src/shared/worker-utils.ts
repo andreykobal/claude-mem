@@ -8,7 +8,7 @@ import { readSseEvents } from "./sse-reader.js";
 import { SettingsDefaultsManager, type SettingsDefaults } from "./SettingsDefaultsManager.js";
 import { MARKETPLACE_ROOT, DATA_DIR, resolveDataDir } from "./paths.js";
 import { loadFromFileOnce } from "./hook-settings.js";
-import { isWorkerAutostartDisabled } from "./worker-autostart.js";
+import { isLocalWorkerLaunchDisabled } from "./worker-autostart.js";
 import { viewerBaseUrl } from "./viewer-url.js";
 import { formatHostForUrl, InvalidWorkerUrlError, isLoopbackHostname, normalizeWorkerBaseUrl } from "./worker-url.js";
 import { normalizeLocalApiToken, localApiTokenHeaders } from "./local-api-token.js";
@@ -1393,7 +1393,7 @@ export async function ensureWorkerRunning(timeoutMs?: number): Promise<boolean> 
   let neverReadyRecycleBuildKey: string | null = null;
   // CLAUDE_MEM_WORKER_AUTOSTART=false: use a running worker, but never launch,
   // kill or recycle one (see worker-autostart.ts).
-  const autostartDisabled = isWorkerAutostartDisabled(loadFromFileOnce());
+  const autostartDisabled = isLocalWorkerLaunchDisabled(loadFromFileOnce());
 
   if (outOfBudget('health probe')) return false;
   if (await isWorkerPortAlive(preSpawnDeadline)) {
@@ -1885,7 +1885,7 @@ async function ensureWorkerReadyWithin(timeoutMs: number): Promise<boolean> {
 
   // CLAUDE_MEM_WORKER_AUTOSTART=false: wait out the budget for the externally
   // managed worker, but never kill, take the spawn lock or launch one.
-  const mayLaunch = !isWorkerAutostartDisabled(loadFromFileOnce());
+  const mayLaunch = !isLocalWorkerLaunchDisabled(loadFromFileOnce());
   if (!mayLaunch) return waitForWorkerToListen(deadline);
 
   const runtimePath = resolveWorkerRuntimePath();
@@ -2381,7 +2381,7 @@ export async function executeWithWorkerFallback<T = unknown>(
     // An externally managed worker (CLAUDE_MEM_WORKER_AUTOSTART=false) being
     // down is the operator's call, not a claude-mem failure: skip quietly and
     // never feed the fail-loud counter.
-    if (isWorkerAutostartDisabled(loadFromFileOnce())) {
+    if (isLocalWorkerLaunchDisabled(loadFromFileOnce())) {
       return { continue: true, reason: 'worker_autostart_disabled', [WORKER_FALLBACK_BRAND]: true };
     }
     if (!boundedStartup) {

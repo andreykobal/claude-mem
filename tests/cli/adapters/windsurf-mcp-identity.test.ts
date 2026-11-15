@@ -201,16 +201,14 @@ describe('Windsurf MCP identity through the shared capture path', () => {
     expect(message.tool_name).toBe('mcp__corp__github__search__issues');
   });
 
-  it('retains the native name when a server failure falls back to the worker', async () => {
+  it('skips the event when the server fails, never handing it to the worker', async () => {
     configureCapture('server', '');
     serverStatus = 503;
-    // The hook has its settings snapshot; the worker reads its current setting
-    // independently when the fallback reaches ingestion.
-    settings.mockReturnValue({ ...loadFromFileOnce(), CLAUDE_MEM_SKIP_TOOLS: 'search' });
     await observationHandler.execute(nativeCall('corp__github', 'search'));
     await settleHookSpoolNudges();
-    expect(requests).toEqual(['/v1/events', '/api/sessions/observations']);
-    expect(workerEvents[0]).toMatchObject({ tool_name: 'mcp__corp__github__search', native_tool_name: 'search' });
+    // Server runtime has one receiver: a missed handoff is a skip (observer-lifecycle contract).
+    expect(requests).toEqual(['/v1/events']);
+    expect(workerEvents).toEqual([]);
     expect(manager.getMessageBuffer().getPendingCount(sessionId)).toBe(0);
   });
 

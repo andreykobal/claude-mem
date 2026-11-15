@@ -248,7 +248,11 @@ export const summarizeHandler: EventHandler = {
             message: error.message,
             route: '/v1/sessions/end',
           });
-          // fall through to the worker spool
+          // Server runtime has one receiver. A missed handoff skips this
+          // event (observer-lifecycle contract); it is never spooled or handed
+          // to a local worker, which would start one and capture into a
+          // database nothing reads.
+          return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
         } else {
           logger.error('HOOK', 'Server summarize failed (non-recoverable)', {
             error: error instanceof Error ? error.message : String(error),

@@ -172,7 +172,7 @@ describe('fileEditHandler — server runtime (data-loss fix)', () => {
     expect(spooledEntries()).toEqual([]);
   });
 
-  it('falls back to the worker spool when the server call is fallback-eligible', async () => {
+  it('skips the edit, spooling nothing, when the server call fails in transport', async () => {
     const fallbackError = new ServerClientError('transport', 'transport down');
     mockRuntime = {
       runtime: 'server',
@@ -185,7 +185,8 @@ describe('fileEditHandler — server runtime (data-loss fix)', () => {
     const result = await fileEditHandler.execute(cursorInput());
 
     expect(result.continue).toBe(true);
-    expect(spooledEntries('file_edit')).toHaveLength(1);
+    // Server runtime has one receiver: a missed handoff is a skip (observer-lifecycle contract).
+    expect(spooledEntries()).toEqual([]);
   });
 
   it('does not spool when the server call is a non-recoverable client error', async () => {

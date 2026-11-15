@@ -135,7 +135,11 @@ export const observationHandler: EventHandler = {
       } catch (error: unknown) {
         if (isServerClientError(error) && error.isFallbackEligible()) {
           logServerFallback(error.kind, { status: error.status, message: error.message, route: '/v1/events' });
-          // fall through to the worker spool
+          // Server runtime has one receiver. A missed handoff skips this
+          // event (observer-lifecycle contract); it is never spooled or handed
+          // to a local worker, which would start one and capture into a
+          // database nothing reads.
+          return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
         } else {
           logger.error('HOOK', 'Server event failed (non-recoverable)', {
             error: error instanceof Error ? error.message : String(error),

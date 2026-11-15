@@ -174,7 +174,7 @@ describe('sessionInitHandler request timeout', () => {
     expect(result.exitCode).toBe(0);
   });
 
-  it('does not reset the full timeout budget after server fallback (#3434)', () => {
+  it('skips the prompt on a server timeout instead of calling the worker (#3434)', () => {
     const env = { ...process.env };
     delete env.CLAUDE_MEM_INTERNAL;
     const fallbackTimeoutMs = 8000;
@@ -220,11 +220,9 @@ describe('sessionInitHandler request timeout', () => {
       if (serverCalls[0].options?.timeoutMs !== Math.floor(${fallbackTimeoutMs} / 2)) {
         throw new Error('server timeout mismatch: ' + JSON.stringify(serverCalls[0].options));
       }
-      const initCall = workerCalls.find(call => call.apiPath === '/api/sessions/init');
-      if (!initCall) throw new Error('worker init call missing');
-      if (typeof initCall.options?.timeoutMs !== 'number' || initCall.options.timeoutMs <= 0 || initCall.options.timeoutMs >= ${fallbackTimeoutMs}) {
-        throw new Error('worker fallback timeout reused full budget: ' + JSON.stringify(initCall.options));
-      }
+      // Server runtime has one receiver: a missed handoff is a skip, never a worker call
+      // (which would start a local worker).
+      if (workerCalls.length !== 0) throw new Error('worker called after a server timeout: ' + JSON.stringify(workerCalls));
     `;
 
     const result = Bun.spawnSync({

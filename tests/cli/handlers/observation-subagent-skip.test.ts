@@ -260,7 +260,7 @@ describe('observationHandler — subagent observation filtering (#2736)', () => 
     expect(spooled()).toHaveLength(0);
   });
 
-  it('falls back to exactly one worker spool entry within the bounded server deadline', async () => {
+  it('skips the event, spooling nothing, when the server misses its bounded deadline', async () => {
     mockRuntime = serverRuntime();
     recordEventError = new ServerClientError('timeout', 'server request timed out');
     const { observationHandler } = await import('../../../src/cli/handlers/observation.js');
@@ -270,7 +270,8 @@ describe('observationHandler — subagent observation filtering (#2736)', () => 
     expect(result.continue).toBe(true);
     expect(recordEventLog).toHaveLength(1);
     expect(recordEventLog[0]?.options).toEqual({ timeoutMs: 2_000 });
-    expect(spooled()).toHaveLength(1);
+    // Server runtime has one receiver: a missed handoff is a skip (observer-lifecycle contract).
+    expect(spooled()).toHaveLength(0);
   });
 
   it('honors CLAUDE_MEM_SKIP_TOOLS on the server runtime (worker ingest never sees server events)', async () => {

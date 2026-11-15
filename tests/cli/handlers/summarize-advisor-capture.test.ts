@@ -62,6 +62,7 @@ mock.module('../../../src/shared/worker-utils.js', () => ({
 }));
 
 const serverEvents: unknown[] = [];
+let endSessionError: Error | null = null;
 mock.module('../../../src/services/hooks/runtime-selector.js', () => ({
   ...realRuntimeSelectorSnapshot,
   resolveRuntimeContext: () => runtimeMode === 'server'
@@ -72,7 +73,7 @@ mock.module('../../../src/services/hooks/runtime-selector.js', () => ({
         client: {
           startSession: async () => ({ session: { id: 'server-session' } }),
           recordEvent: async (event: unknown) => { serverEvents.push(event); return {}; },
-          endSession: async () => ({}),
+          endSession: async () => { if (endSessionError) throw endSessionError; return {}; },
         },
       }
     : { runtime: 'worker' },
@@ -92,6 +93,7 @@ beforeEach(() => {
   tempSpool = useTempHookSpoolDataDir();
   workerCalls.length = 0;
   serverEvents.length = 0;
+  endSessionError = null;
   captureSetting = 'false';
   runtimeMode = 'worker';
   loggerSpies = (['info', 'debug', 'warn', 'error', 'failure', 'dataIn'] as const)
@@ -221,5 +223,18 @@ describe('Stop hook advisor-call capture', () => {
     expect(workerCalls).toHaveLength(0);
     expect(spooledEntries()).toHaveLength(0);
     expect(serverEvents).toHaveLength(1);
+  });
+
+  it('skips the summary, spooling nothing, when the server cannot be reached', async () => {
+    runtimeMode = 'server';
+    const { ServerClientError } = await import('../../../src/services/hooks/server-client.js');
+    endSessionError = new ServerClientError('timeout', 'server request timed out');
+
+    const result = await summarizeHandler.execute(stopInput());
+
+    expect(result.continue).toBe(true);
+    // Server runtime has one receiver: a missed handoff is a skip (observer-lifecycle contract).
+    expect(workerCalls).toHaveLength(0);
+    expect(spooledEntries()).toHaveLength(0);
   });
 });

@@ -276,7 +276,12 @@ const sessionInit = {
             message: error.message,
             route: '/v1/sessions/start',
           });
-          // fall through to worker fallback
+          // Server runtime has one receiver. A missed handoff skips this
+          // event (observer-lifecycle contract); it is never spooled or handed
+          // to a local worker, which would start one and capture into a
+          // database nothing reads.
+          if (requireRecordedPrompt) throw new SessionPromptNotRecordedError(error.kind);
+          return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
         } else {
           // Not thrown for recordSessionPrompt either: a rejection that does
           // not pass would stop the transcript watcher on this turn for good

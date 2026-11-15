@@ -7,7 +7,7 @@
 // without vectors are picked up by backfillMissingEmbeddings, which runs at
 // startup in the generation worker, or in a server that has none.
 
-import { availableParallelism } from 'os';
+import { effectiveCpuCount } from '../../shared/cpu-quota.js';
 import pg from 'pg';
 import type { PostgresQueryable } from '../../storage/postgres/utils.js';
 import type { VectorSchemaMode } from '../../storage/postgres/schema.js';
@@ -40,11 +40,11 @@ export function getSharedEmbedder(): Embedder {
 
 /**
  * CLAUDE_MEM_EMBEDDING_BACKFILL_THREADS: a number, 0 for no cap, empty for
- * half the CPU threads. A value that is not a number of threads takes the
+ * half the CPUs this process may use (effectiveCpuCount). A value that is not a number of threads takes the
  * default rather than every thread.
  */
 function backfillThreads(): number {
-  const half = Math.max(1, Math.floor(availableParallelism() / 2));
+  const half = Math.max(1, Math.floor(effectiveCpuCount() / 2));
   const value = SettingsDefaultsManager.get('CLAUDE_MEM_EMBEDDING_BACKFILL_THREADS').trim();
   const threads = Number(value);
   return value === '' || !Number.isFinite(threads) || threads < 0 ? half : Math.floor(threads);
@@ -68,7 +68,7 @@ export async function capEmbedderThreadsForBackfill(client: PostgresQueryable): 
   logger.warn('SYSTEM', 'embedding stored observations for search by meaning; this may take hours', {
     observations: backlog,
     model,
-    threads: threads > 0 ? `${threads} of ${availableParallelism()}, until the next restart` : 'all',
+    threads: threads > 0 ? `${threads} of ${effectiveCpuCount()}, until the next restart` : 'all',
     progress: '/v1/info vectorSearch.observationsWithoutVectors',
     settings: 'CLAUDE_MEM_EMBEDDING_BACKFILL_THREADS=0 uses every thread; CLAUDE_MEM_SERVER_VECTOR_SEARCH=false stops it',
   });
