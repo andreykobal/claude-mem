@@ -28,6 +28,7 @@ export * from './server-sessions.js';
 export * from './teams.js';
 export * from './usage.js';
 export * from './work-state.js';
+export * from './authors.js';
 export type * from './utils.js';
 export { toPostgresJson } from './utils.js';
 

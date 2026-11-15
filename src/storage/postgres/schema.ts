@@ -83,6 +83,9 @@ async function isNewOrVectorDatabase(client: PostgresQueryable): Promise<boolean
 export const API_KEY_SCHEMA_SQL = `
 ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS key_prefix TEXT;
 CREATE INDEX IF NOT EXISTS idx_api_keys_key_prefix ON api_keys(key_prefix);
+-- Who a key writes as: one key per machine, labelled (A, B, C...); rows carry
+-- the writing key as their author.
+ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS label TEXT;
 `;
 
 /**
@@ -305,6 +308,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   -- deterministic per raw key, so verification narrows candidates by this
   -- prefix (mirrors the SQLite backend's prefix column, #2541).
   key_prefix TEXT,
+  label TEXT,
   team_id TEXT REFERENCES teams(id) ON DELETE CASCADE,
   project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
   actor_id TEXT NOT NULL,
@@ -471,6 +475,9 @@ CREATE INDEX IF NOT EXISTS idx_server_sessions_platform_source
   WHERE platform_source IS NOT NULL;
 ALTER TABLE observations ADD COLUMN IF NOT EXISTS content_search TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED;
 ALTER TABLE observations DROP CONSTRAINT IF EXISTS observations_generation_key_key;
+-- The key (machine) whose events or write produced the row; null before authors.
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS author_key_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_observations_author ON observations(team_id, project_id, author_key_id, created_at);
 ALTER TABLE observation_generation_jobs DROP CONSTRAINT IF EXISTS observation_generation_jobs_source_type_source_id_job_type_key;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_server_sessions_project_idempotency
   ON server_sessions(project_id, idempotency_key)
@@ -550,6 +557,8 @@ CREATE TABLE IF NOT EXISTS work_state_entries (
   FOREIGN KEY (project_id, team_id) REFERENCES projects(id, team_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_work_state_entries_scope ON work_state_entries(team_id, project_id, list_name, id);
+-- Each machine keeps its own lists: the writing key; null rows predate authors.
+ALTER TABLE work_state_entries ADD COLUMN IF NOT EXISTS author_key_id TEXT;
 `;
 
 // One vector per part of an observation (narrative, legacy text, each fact,

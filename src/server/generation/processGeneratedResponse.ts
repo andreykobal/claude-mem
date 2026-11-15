@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { authorLabel } from '../../storage/postgres/authors.js';
 import { parseAgentXml, type ParsedObservation, type ParsedSummary } from '../../sdk/parser.js';
 import { logger } from '../../utils/logger.js';
 import {
@@ -347,6 +348,8 @@ async function persistGeneratedObservations(
     // global project; copying the folder onto each observation's metadata lets
     // context injection and search facet by folder without isolating memory.
     const sessionProject = await fetchSessionProject(client, fresh.serverSessionId, fresh.id);
+    // The machine whose events these are: the key that sent them.
+    const author = await authorLabel(client, input.apiKeyId);
 
     const persisted: PostgresObservation[] = [];
     for (let index = 0; index < rendered.length; index++) {
@@ -380,8 +383,10 @@ async function persistGeneratedObservations(
           project: sessionProject,
           provider: input.providerLabel,
           model: input.modelId ?? null,
+          ...(author ? { author } : {}),
         },
         createdByJobId: fresh.id,
+        authorKeyId: input.apiKeyId ?? null,
       });
       persisted.push(observation);
 

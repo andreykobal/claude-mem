@@ -76,6 +76,8 @@ export async function fetchServerContextRows(
     const result = await runtime.client.contextObservations({
       projectId: runtime.projectId,
       ...(projectIds ? { projectIds } : {}),
+      // This machine's rows first, then the other machines' (labelled).
+      preferOwn: true,
       // NO `query` KEY. With one the route ranks by FTS; with the key absent it
       // returns the NEWEST, which is what a session-start block is. `query: ''`
       // is not a third option -- the route's schema rejects it (min 1 char).
@@ -214,7 +216,7 @@ export function toLocalObservationShape(
     content_session_id: asText(pick(row, 'contentSessionId', 'content_session_id')) ?? undefined,
     platform_source: asText(pick(row, 'platformSource', 'platform_source')) ?? platformSource ?? '',
     type: asText(pick(row, 'kind', 'type')) ?? 'discovery',
-    title: asText(pick(row, 'title')) ?? firstLine,
+    title: withOtherAuthor(row, asText(pick(row, 'title')) ?? firstLine),
     subtitle: asText(pick(row, 'subtitle')),
     narrative: asText(pick(row, 'narrative')) ?? (content || null),
     facts: asJsonText(pick(row, 'facts')),
@@ -226,6 +228,16 @@ export function toLocalObservationShape(
     created_at_epoch: epoch,
     project: asText(pick(row, 'project')) ?? project,
   };
+}
+
+/**
+ * Several machines write one project: a row another machine wrote reads as
+ * "[B] title", so the block says whose work it was. This machine's rows, and
+ * rows from before authors, stay as they are.
+ */
+function withOtherAuthor(row: ServerRow, text: string): string {
+  const author = asText((row as { author?: unknown }).author);
+  return (row as { mine?: unknown }).mine === false && author && text ? `[${author}] ${text}` : text;
 }
 
 // A server summary is a kind='summary' observation whose metadata carries the
@@ -240,7 +252,7 @@ export function toLocalSummaryShape(
     id: asText(row.id) ?? '',
     memory_session_id: asText(pick(row, 'serverSessionId', 'memory_session_id')) ?? '',
     platform_source: asText(pick(row, 'platformSource', 'platform_source')) ?? platformSource ?? '',
-    request: asText(pick(row, 'request')),
+    request: ((request) => request ? withOtherAuthor(row, request) : request)(asText(pick(row, 'request'))),
     investigated: asText(pick(row, 'investigated')),
     learned: asText(pick(row, 'learned')),
     completed: asText(pick(row, 'completed')),

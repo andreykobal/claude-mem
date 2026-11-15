@@ -361,6 +361,17 @@ describe('session-start context from the shared store', () => {
     expect(model).not.toContain('Work state');
   });
 
+  it('marks another machine\'s rows with its label and asks for this machine\'s first', async () => {
+    respond = async () => ({ observations: [
+      observationRow(1, { mine: true, author: 'A' }),
+      observationRow(2, { mine: false, author: 'B' }),
+    ] });
+    const { model } = await generateServerSessionStartContext(serverRuntime(), input, { withTerminalRender: false, timeoutMs: 12_000 });
+    expect(contextCalls[0]).toMatchObject({ preferOwn: true });
+    expect(model).toContain('[B] Observation 2');
+    expect(model).not.toContain('[A] Observation 1');
+  });
+
   it('never consults the store in worker runtime', async () => {
     runtimeStub = { runtime: 'worker' };
     await generateContextWithStats(input);

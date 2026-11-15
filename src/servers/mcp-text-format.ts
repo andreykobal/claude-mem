@@ -174,7 +174,9 @@ export function formatMcpPayload(purpose: McpTextPurpose, payload: unknown): Mcp
         }
         const context = purpose === 'server-timeline'
           ? [recordedAt(row), line(prose, '', 160).trim()].filter(Boolean).join(' · ') : '';
-        return `- ${identity({ ...row, id, title: title ?? 'Untitled memory' })}${context ? `\n  ${context}` : ''}`;
+        // Another machine's row says whose it was.
+        const byOther = row.mine === false && typeof row.author === 'string' && row.author ? `[${row.author}] ` : '';
+        return `- ${identity({ ...row, id, title: `${byOther}${title ?? 'Untitled memory'}` })}${context ? `\n  ${context}` : ''}`;
       });
       const included: string[] = [];
       let bytes = Buffer.byteLength(next + deepText, 'utf8') + 302;

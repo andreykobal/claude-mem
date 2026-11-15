@@ -31,6 +31,8 @@ export interface PostgresObservation {
   metadata: JsonObject;
   embedding: JsonValue | null;
   createdByJobId: string | null;
+  /** The key (machine) that wrote it; null on rows from before authors. */
+  authorKeyId: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number;
 }
@@ -59,6 +61,7 @@ interface ObservationRow {
   metadata: unknown;
   embedding: unknown | null;
   created_by_job_id: string | null;
+  author_key_id?: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -153,6 +156,12 @@ function dateRangeSql(start: string, end: string): string {
     AND (${end}::bigint IS NULL OR observations.created_at <= to_timestamp(${end}::bigint / 1000.0))`;
 }
 
+/** Only one author's rows, or all but one author's; a null bound is open. */
+function authorSql(only: string, except: string): string {
+  return `(${only}::text IS NULL OR observations.author_key_id = ${only})
+    AND (${except}::text IS NULL OR observations.author_key_id IS DISTINCT FROM ${except})`;
+}
+
 function dateOrderSql(orderBy: Exclude<SearchOrder, 'relevance'>): string {
   const direction = orderBy === 'date_asc' ? 'ASC' : 'DESC';
   return `observations.created_at ${direction}, observations.id ${direction}`;
@@ -214,6 +223,10 @@ export class PostgresObservationRepository {
     metadata?: JsonObject;
     embedding?: JsonValue | null;
     createdByJobId?: string | null;
+    /** The writing key (machine); see author columns in schema.ts. */
+    authorKeyId?: string | null;
+    /** The row's original time (import); now when absent. */
+    createdAtEpoch?: number | null;
   }): Promise<PostgresObservation> {
     await assertProjectOwnership(this.client, input.projectId, input.teamId);
     if (input.serverSessionId) {
@@ -228,9 +241,10 @@ export class PostgresObservationRepository {
       `
         INSERT INTO observations (
           id, project_id, team_id, server_session_id, kind, content,
-          generation_key, metadata, embedding, created_by_job_id
+          generation_key, metadata, embedding, created_by_job_id, author_key_id, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11,
+          COALESCE(to_timestamp($12::bigint / 1000.0), now()), COALESCE(to_timestamp($12::bigint / 1000.0), now()))
         ON CONFLICT (team_id, project_id, generation_key) WHERE generation_key IS NOT NULL DO UPDATE SET
           updated_at = observations.updated_at
         RETURNING *
@@ -245,7 +259,9 @@ export class PostgresObservationRepository {
         input.generationKey ?? null,
         JSON.stringify(input.metadata ?? {}),
         input.embedding == null ? null : JSON.stringify(input.embedding),
-        input.createdByJobId ?? null
+        input.createdByJobId ?? null,
+        input.authorKeyId ?? null,
+        input.createdAtEpoch ?? null,
       ]
     );
     return mapObservationRow(row!);
@@ -484,6 +500,9 @@ export class PostgresObservationRepository {
     orderBy?: SearchOrder;
     /** Rows to skip; bounded by the caller (MAX_LISTING_OFFSET, HYBRID_MAX_WINDOW). */
     offset?: number;
+    /** Only this key's rows, or every row but this key's (its machine's own). */
+    authorOnly?: string | null;
+    authorExcept?: string | null;
   }): Promise<PostgresObservation[]> {
     const platformSource = normalizePlatformSourceOrNull(input.platformSource);
     const offset = Math.max(0, input.offset ?? 0);
@@ -516,6 +535,8 @@ export class PostgresObservationRepository {
         input.observationConcepts ?? null,
         dateStart,
         dateEnd,
+        input.authorOnly ?? null,
+        input.authorExcept ?? null,
       ], orderBy);
       return rows.slice(offset);
     }
@@ -547,6 +568,7 @@ export class PostgresObservationRepository {
         WHERE ${SEARCH_SCOPE_SQL}
           AND ${observationModeFilterSql('$9', '$10')}
           AND ${dateRangeSql('$11', '$12')}
+          AND ${authorSql('$14', '$15')}
           ${bm25MatchesAnyTerm ? '' : "AND ($3::text IS NULL OR observations.content_search @@ websearch_to_tsquery('english', $3))"}
         ORDER BY ${orderBy !== 'relevance'
           ? dateOrderSql(orderBy)
@@ -571,6 +593,8 @@ export class PostgresObservationRepository {
         dateStart,
         dateEnd,
         offset,
+        input.authorOnly ?? null,
+        input.authorExcept ?? null,
       ]
     );
     return result.rows.filter(row => !bm25MatchesAnyTerm || row.matches_query).map(mapObservationRow);
@@ -587,7 +611,7 @@ export class PostgresObservationRepository {
   // are compared: while rows are re-embedded after a model change, the others
   // are in another model's space, where distance means nothing.
   private async searchHybrid(params: unknown[], orderBy: SearchOrder = 'relevance'): Promise<PostgresObservation[]> {
-    const scopeSql = `${SEARCH_SCOPE_SQL} AND ${observationModeFilterSql('$13', '$14')} AND ${dateRangeSql('$15', '$16')}`;
+    const scopeSql = `${SEARCH_SCOPE_SQL} AND ${observationModeFilterSql('$13', '$14')} AND ${dateRangeSql('$15', '$16')} AND ${authorSql('$17', '$18')}`;
     // The bm25 candidates come in the index scan's order, numbered as they
     // come; the score is not named outside ORDER BY, so the scan is not
     // rescored (see search()). The LIMIT keeps the planner from pushing the
@@ -634,7 +658,8 @@ export class PostgresObservationRepository {
     // drops can fill the cutoff and leave none of the rows it keeps.
     const [, , , , platformSource, folderProjects, excludeSubagents, summary] = params;
     const narrowed = platformSource !== null || folderProjects !== null || excludeSubagents === true || summary !== null
-      || params[12] !== null || params[13] !== null || params[14] !== null || params[15] !== null;
+      || params[12] !== null || params[13] !== null || params[14] !== null || params[15] !== null
+      || params[16] !== null || params[17] !== null;
     const sql = `
       WITH ${keyword},
       nearest AS (${narrowed
@@ -933,6 +958,7 @@ function mapObservationRow(row: ObservationRow): PostgresObservation {
     metadata: toJsonObject(row.metadata),
     embedding: row.embedding,
     createdByJobId: row.created_by_job_id,
+    authorKeyId: row.author_key_id ?? null,
     createdAtEpoch: toEpoch(row.created_at),
     updatedAtEpoch: toEpoch(row.updated_at)
   };

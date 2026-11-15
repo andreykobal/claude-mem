@@ -31,26 +31,30 @@ interface WorkStateRow extends QueryResultRow {
 export class PostgresWorkStateRepository {
   constructor(private client: PostgresQueryable) {}
 
-  async append(input: { teamId: string; projectId: string; listName: string; fields: WorkStateFields }): Promise<PostgresWorkStateEntry> {
+  async append(input: { teamId: string; projectId: string; listName: string; fields: WorkStateFields; authorKeyId?: string | null }): Promise<PostgresWorkStateEntry> {
     const result = await this.client.query<WorkStateRow>(
       `
-        INSERT INTO work_state_entries (project_id, team_id, list_name, fields)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO work_state_entries (project_id, team_id, list_name, fields, author_key_id)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id, project_id, list_name, fields, created_at
       `,
-      [input.projectId, input.teamId, input.listName, JSON.stringify(input.fields)],
+      [input.projectId, input.teamId, input.listName, JSON.stringify(input.fields), input.authorKeyId ?? null],
     );
     return mapRow(result.rows[0]!);
   }
 
-  /** Every entry of the project (or of one list), in write order. Shared My Work records never leave. */
-  async list(input: { teamId: string; projectId: string; listName?: string }): Promise<PostgresWorkStateEntry[]> {
+  /**
+   * Every entry of the project (or of one list), in write order. Each machine
+   * keeps its own lists: with `authorKeyId`, that key's rows and rows from
+   * before authors. Shared My Work records never leave.
+   */
+  async list(input: { teamId: string; projectId: string; listName?: string; authorKeyId?: string | null }): Promise<PostgresWorkStateEntry[]> {
     if (input.listName !== undefined && isSharedWorkList(input.listName)) return [];
-    const params: unknown[] = [input.teamId, input.projectId];
-    let listFilter = '';
+    const params: unknown[] = [input.teamId, input.projectId, input.authorKeyId ?? null];
+    let listFilter = ' AND ($3::text IS NULL OR author_key_id IS NULL OR author_key_id = $3)';
     if (input.listName !== undefined) {
       params.push(input.listName);
-      listFilter = ' AND list_name = $3';
+      listFilter += ' AND list_name = $4';
     }
     const result = await this.client.query<WorkStateRow>(
       `

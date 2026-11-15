@@ -176,6 +176,8 @@ export interface ServerSearchObservationsRequest {
   dateStart?: string | number;
   dateEnd?: string | number;
   category?: 'all' | 'observations' | 'sessions' | 'prompts';
+  /** 'mine', 'others', or a machine's label. */
+  author?: string;
   observationTypes?: string[];
   observationConcepts?: string[];
   folderProjects?: string[];
@@ -197,6 +199,8 @@ export interface ServerContextObservationsRequest {
   projectId: string;
   /** Several projects at once (names as `name:<project>`); projectId still names the caller's own. */
   projectIds?: string[];
+  /** This machine's (key's) rows take most of the window, the other machines' the rest. */
+  preferOwn?: boolean;
   // OPTIONAL, and the whole session-start read depends on it being optional.
   // With a query the route is FTS and answers by relevance; with the key ABSENT
   // it answers by recency, which is what a session-start block is. An empty
@@ -395,6 +399,7 @@ export class ServerClient {
     // would let a search ship without one.
     const payload: Record<string, unknown> = { projectId: input.projectId };
     if (input.projectIds && input.projectIds.length > 0) payload.projectIds = input.projectIds;
+    if (input.preferOwn) payload.preferOwn = true;
     if (input.query !== undefined) payload.query = input.query;
     if (input.limit !== undefined) payload.limit = input.limit;
     if (input.summaryLimit !== undefined) payload.summaryLimit = input.summaryLimit;
@@ -548,6 +553,7 @@ export class ServerClient {
       ...(input.dateStart !== undefined ? { dateStart: input.dateStart } : {}),
       ...(input.dateEnd !== undefined ? { dateEnd: input.dateEnd } : {}),
       ...(input.category !== undefined ? { category: input.category } : {}),
+      ...(input.author ? { author: input.author } : {}),
       ...(input.observationTypes?.length ? { observationTypes: input.observationTypes } : {}),
       ...(input.observationConcepts?.length ? { observationConcepts: input.observationConcepts } : {}),
       ...(input.folderProjects?.length ? { folderProjects: input.folderProjects } : {}),

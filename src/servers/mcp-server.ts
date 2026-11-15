@@ -636,7 +636,8 @@ function serverSearchRequest(args: Record<string, unknown>):
   const dateStart = args.dateStart ?? args.date_start ?? args.date_from;
   const dateEnd = args.dateEnd ?? args.date_end ?? args.date_to;
   const hasFilter = observationTypes.length > 0 || observationConcepts.length > 0 || dateStart !== undefined
-    || dateEnd !== undefined || (category !== undefined && category !== 'all');
+    || dateEnd !== undefined || (category !== undefined && category !== 'all')
+    || (typeof args.author === 'string' && args.author.trim() !== '');
   if (!query && !hasFilter) return { error: 'Search needs a query or a filter (type, obs_type, concepts, dateStart, dateEnd).' };
   const number = (value: unknown) => value === undefined || value === null || value === '' ? undefined : Number(value);
   const limit = number(args.limit);
@@ -654,6 +655,7 @@ function serverSearchRequest(args: Record<string, unknown>):
       ...(observationTypes.length ? { observationTypes } : {}),
       ...(observationConcepts.length ? { observationConcepts } : {}),
       ...(args.platformSource !== undefined ? { platformSource: normalizeMcpPlatformSource(args.platformSource as string | null) } : {}),
+      ...(typeof args.author === 'string' && args.author.trim() ? { author: args.author.trim() } : {}),
     },
   };
 }
@@ -960,7 +962,8 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
         dateStart: { type: 'string', description: 'Start date filter (ISO)' },
         dateEnd: { type: 'string', description: 'End date filter (ISO)' },
         offset: { type: 'number', description: 'Pagination offset' },
-        orderBy: { type: 'string', description: 'Sort order: date_desc or date_asc' }
+        orderBy: { type: 'string', description: 'Sort order: date_desc or date_asc' },
+        author: { type: 'string', description: "Server runtime: which machine wrote it — 'mine', 'others', or a machine's label (e.g. 'B')" }
       },
       additionalProperties: true
     },

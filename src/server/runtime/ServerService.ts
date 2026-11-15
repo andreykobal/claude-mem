@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { setAuthorLabel } from '../../storage/postgres/authors.js';
 import type { Application } from 'express';
 import { spawn } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
@@ -597,6 +598,8 @@ export async function runServerApiKeyCli(argv: string[]): Promise<void> {
         scopes,
         actorId: 'system:server-cli',
       });
+      // --name labels the machine this key writes as.
+      if (typeof options.name === 'string' && options.name.trim()) await setAuthorLabel(pool, created.id, options.name.trim());
       console.log(JSON.stringify({
         id: created.id,
         key: rawKey,
@@ -642,8 +645,9 @@ export async function runServerApiKeyCli(argv: string[]): Promise<void> {
         expires_at: Date | null;
         last_used_at: Date | null;
         created_at: Date;
+        label: string | null;
       }>(
-        `SELECT id, team_id, project_id, scopes, revoked_at, expires_at, last_used_at, created_at
+        `SELECT id, team_id, project_id, scopes, revoked_at, expires_at, last_used_at, created_at, label
          FROM api_keys
          ${where}
          ORDER BY created_at DESC
@@ -657,6 +661,7 @@ export async function runServerApiKeyCli(argv: string[]): Promise<void> {
         count: result.rows.length,
         keys: result.rows.map(row => ({
           id: row.id,
+          label: row.label,
           teamId: row.team_id,
           projectId: row.project_id,
           scopes: row.scopes,
@@ -689,8 +694,24 @@ export async function runServerApiKeyCli(argv: string[]): Promise<void> {
       return;
     }
 
+    // The machine a key writes as (rows show it as their author): A, B, C...
+    if (sub === 'label') {
+      const id = argv[1];
+      const label = argv[2]?.trim() ?? '';
+      if (!id || !label) {
+        console.error('Usage: server-service server api-key label <id> <label>');
+        process.exit(1);
+      }
+      if (!(await setAuthorLabel(pool, id, label))) {
+        console.error(`API key not found: ${id}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify({ id, label }, null, 2));
+      return;
+    }
+
     console.error(`Unknown server api-key subcommand: ${sub ?? '(none)'}`);
-    console.error('Usage: server-service server api-key create|list|revoke|migrate-scopes');
+    console.error('Usage: server-service server api-key create|list|revoke|label|migrate-scopes');
     process.exit(1);
   } finally {
     // Pool is shared; do not close here. The process will exit and the

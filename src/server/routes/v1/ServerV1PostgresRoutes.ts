@@ -19,7 +19,7 @@ import {
   type PostgresObservationGenerationJob,
 } from '../../../storage/postgres/generation-jobs.js';
 import { PostgresAuthRepository } from '../../../storage/postgres/auth.js';
-import { PostgresObservationRepository, SEARCH_ORDERS, TIMELINE_MAX_DEPTH } from '../../../storage/postgres/observations.js';
+import { PostgresObservationRepository, SEARCH_ORDERS, TIMELINE_MAX_DEPTH, type PostgresObservation } from '../../../storage/postgres/observations.js';
 import { resolveDateBound } from '../../../shared/date-bounds.js';
 import {
   embedObservationRows,
@@ -43,6 +43,7 @@ import { createRecallMcpServer, type RecallBackend } from '../../mcp/recall-mcp-
 import { serverUsageGuards } from '../../middleware/usage-guards.js';
 import { projectNameResolver } from '../../middleware/project-name-resolver.js';
 import { PostgresUsageRepository } from '../../../storage/postgres/usage.js';
+import { authorLabel } from '../../../storage/postgres/authors.js';
 import { PostgresWorkStateRepository, type PostgresWorkStateEntry } from '../../../storage/postgres/work-state.js';
 import { expandFilePathCandidates } from '../../../shared/file-path-candidates.js';
 import { workStateListSchema, workStateWriteFieldsSchema, workStateWriteRefusal } from '../../../shared/work-state-write.js';
@@ -61,6 +62,9 @@ import {
 } from '../../../shared/server-context-limits.js';
 
 const SOURCE_ADAPTER_DEFAULT = 'api';
+
+/** The asking machine's share of a SessionStart window when several machines write one project. */
+const OWN_CONTEXT_SHARE = 0.7;
 
 /** A relevance search fuses ranked windows of at most this many rows. */
 const HYBRID_SEARCH_MAX_WINDOW = 500;
@@ -993,6 +997,8 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         const folderLabel = typeof body.metadata?.project === 'string' && body.metadata.project.trim()
           ? null
           : (await new PostgresProjectsRepository(this.options.pool).getByIdForTeam(body.projectId, teamId))?.name ?? null;
+        const authorKeyId = req.authContext?.apiKeyId ?? null;
+        const author = await authorLabel(this.options.pool, authorKeyId);
         const createInput = {
           id: randomUUID(),
           generationKey: body.generationKey,
@@ -1003,8 +1009,10 @@ export class ServerV1PostgresRoutes implements RouteHandler {
           content: body.content,
           // A manual memory can arrive without any session to carry its
           // platform. Keep the supplied source on the row for scoped recall.
+          authorKeyId,
           metadata: {
             ...(folderLabel ? { project: folderLabel } : {}),
+            ...(author ? { author } : {}),
             ...body.metadata,
             ...(body.platformSource == null ? {} : {
               platformSource: normalizePlatformSource(body.platformSource),
@@ -1073,7 +1081,10 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         observationConcepts: z.array(z.string().min(1)).max(50).optional(),
         folderProjects: z.array(z.string().min(1)).min(1).max(20).optional(),
         platformSource: z.string().min(1).nullable().optional(),
+        // Which machine wrote it: 'mine' (the asking key), 'others', or a key's label.
+        author: z.string().trim().min(1).max(100).optional(),
       }).refine(body => body.query !== undefined || body.dateStart !== undefined || body.dateEnd !== undefined
+        || body.author !== undefined
         || body.observationTypes !== undefined || body.observationConcepts !== undefined
         || (body.category !== undefined && body.category !== 'all'),
       { message: 'query or at least one filter is required' }),
@@ -1104,6 +1115,11 @@ export class ServerV1PostgresRoutes implements RouteHandler {
           res.status(400).json({ error: 'BadRequest', message: error instanceof Error ? error.message : 'invalid date bound' });
           return;
         }
+        const authorFilter = await this.authorFilter(req, teamId, body.author);
+        if (authorFilter === null) {
+          res.status(200).json({ observations: [] });
+          return;
+        }
         const summary = body.category === 'sessions' ? true
           : body.category === 'observations' || body.observationTypes !== undefined ? false
           : undefined;
@@ -1113,6 +1129,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
           results = await repo.search({
             projectId: body.projectId,
             ...(projectIds.length ? { projectIds } : {}),
+            ...authorFilter,
             teamId,
             query: body.query ?? null,
             limit,
@@ -1143,7 +1160,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
           observationIds: results.map(o => o.id),
         });
         res.status(200).json({
-          observations: results.map(serializeObservation),
+          observations: results.map(serializerFor(req)),
         });
       },
     ));
@@ -1209,7 +1226,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         await this.auditWrite(req, 'observation.read', anchorId ?? null, body.projectId, {
           mode: 'timeline', resultCount: rows.length,
         });
-        res.json({ observations: rows.map(serializeObservation), ...(anchorId ? { anchorId } : {}) });
+        res.json({ observations: rows.map(serializerFor(req)), ...(anchorId ? { anchorId } : {}) });
       },
     ));
 
@@ -1241,7 +1258,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         await this.auditWrite(req, 'observation.read', null, body.projectId, {
           mode: 'selected', resultCount: rows.length, observationIds: rows.map(row => row.id),
         });
-        res.json({ observations: rows.map(serializeObservation) });
+        res.json({ observations: rows.map(serializerFor(req)) });
       },
     ));
 
@@ -1307,7 +1324,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         }
         rows.sort((a, b) => a.createdAtEpoch - b.createdAtEpoch || a.id.localeCompare(b.id));
         await this.auditWrite(req, 'observation.read', null, body.projectId, { mode: 'corpus', resultCount: rows.length });
-        res.json({ observations: rows.map(serializeObservation) });
+        res.json({ observations: rows.map(serializerFor(req)) });
       },
     ));
 
@@ -1415,7 +1432,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         await this.auditWrite(req, 'observation.read', null, body.projectId, {
           mode: 'by-file', resultCount: rows.length, observationIds: rows.map(row => row.id),
         });
-        res.json({ observations: rows.map(serializeObservation) });
+        res.json({ observations: rows.map(serializerFor(req)) });
       },
     ));
 
@@ -1430,6 +1447,10 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         // parent; CLAUDE_MEM_CONTEXT_PROJECTS=all). Names resolve like
         // projectId; unknown names read as empty.
         projectIds: z.array(z.string().min(1)).max(20).optional(),
+        // Several machines in one project: this machine's (the asking key's)
+        // rows take OWN_CONTEXT_SHARE of the window, the others' the rest, so
+        // another machine's busy day never crowds out this one's own work.
+        preferOwn: z.boolean().optional(),
         // Optional: a context request with no query asks for the most RECENT
         // observations, which is what a session-start block actually wants.
         query: z.string().min(1).optional(),
@@ -1488,20 +1509,34 @@ export class ServerV1PostgresRoutes implements RouteHandler {
             observationConcepts: body.observationConcepts,
             queryEmbedding: await embedSearchQuery(this.options.pool, body.query),
           };
-          if (body.summaryLimit === undefined) {
-            results = await repo.search(searchInput);
-          } else {
-            const observationLimit = limit - body.summaryLimit;
+          const byRecency = (a: PostgresObservation, b: PostgresObservation) =>
+            b.createdAtEpoch - a.createdAtEpoch || b.updatedAtEpoch - a.updatedAtEpoch;
+          // One window: `windowLimit` rows, `windowSummaries` of them summaries.
+          const readWindow = async (windowLimit: number, windowSummaries: number | undefined, author: { authorOnly?: string; authorExcept?: string }) => {
+            if (windowLimit <= 0) return [];
+            const input = { ...searchInput, ...author, limit: windowLimit };
+            if (windowSummaries === undefined) return repo.search(input);
+            const observationLimit = windowLimit - windowSummaries;
             const [observations, summaries] = await Promise.all([
-              observationLimit > 0
-                ? repo.search({ ...searchInput, limit: observationLimit, summary: false })
-                : Promise.resolve([]),
-              body.summaryLimit > 0
-                ? repo.search({ ...searchInput, limit: body.summaryLimit, summary: true })
-                : Promise.resolve([]),
+              observationLimit > 0 ? repo.search({ ...input, limit: observationLimit, summary: false }) : Promise.resolve([]),
+              windowSummaries > 0 ? repo.search({ ...input, limit: windowSummaries, summary: true }) : Promise.resolve([]),
             ]);
-            results = [...observations, ...summaries].sort((a, b) =>
-              b.createdAtEpoch - a.createdAtEpoch || b.updatedAtEpoch - a.updatedAtEpoch);
+            return [...observations, ...summaries].sort(byRecency);
+          };
+          const viewer = req.authContext?.apiKeyId ?? null;
+          if (body.preferOwn && viewer && !body.query) {
+            const ownLimit = Math.ceil(limit * OWN_CONTEXT_SHARE);
+            const ownSummaries = body.summaryLimit === undefined ? undefined : Math.ceil(body.summaryLimit * OWN_CONTEXT_SHARE);
+            const own = await readWindow(ownLimit, ownSummaries, { authorOnly: viewer });
+            // Room this machine did not use goes to the others.
+            const othersLimit = limit - own.length;
+            const othersSummaries = body.summaryLimit === undefined
+              ? undefined
+              : Math.min(othersLimit, body.summaryLimit - own.filter(row => row.kind === 'summary').length);
+            const others = await readWindow(othersLimit, othersSummaries, { authorExcept: viewer });
+            results = [...own, ...others].sort(byRecency);
+          } else {
+            results = await readWindow(limit, body.summaryLimit, {});
           }
         } catch (error) {
           const err = error instanceof Error ? error : new Error(String(error));
@@ -1527,7 +1562,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
           observationIds: results.map(o => o.id),
         });
         res.status(200).json({
-          observations: results.map(serializeObservation),
+          observations: results.map(serializerFor(req)),
           context,
         });
       },
@@ -1563,8 +1598,9 @@ export class ServerV1PostgresRoutes implements RouteHandler {
             return;
           }
           const repo = new PostgresWorkStateRepository(this.options.pool);
-          const entry = await repo.append({ teamId, projectId: body.projectId, listName: body.list, fields: body.fields });
-          const entries = await repo.list({ teamId, projectId: body.projectId, listName: body.list });
+          const authorKeyId = req.authContext?.apiKeyId ?? null;
+          const entry = await repo.append({ teamId, projectId: body.projectId, listName: body.list, fields: body.fields, authorKeyId });
+          const entries = await repo.list({ teamId, projectId: body.projectId, listName: body.list, authorKeyId });
           await this.auditWrite(req, 'work_state.write', String(entry.id), body.projectId, { list: body.list });
           res.status(201).json({ entry: serializeWorkStateEntry(entry), entries: entries.map(serializeWorkStateEntry) });
         } catch (error) {
@@ -1588,7 +1624,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         if (!this.ensureProjectAllowed(req, res, body.projectId)) return;
         try {
           const entries = await new PostgresWorkStateRepository(this.options.pool)
-            .list({ teamId, projectId: body.projectId, ...(body.list ? { listName: body.list } : {}) });
+            .list({ teamId, projectId: body.projectId, ...(body.list ? { listName: body.list } : {}), authorKeyId: req.authContext?.apiKeyId ?? null });
           res.status(200).json({ entries: entries.map(serializeWorkStateEntry) });
         } catch (error) {
           const err = error instanceof Error ? error : new Error(String(error));
@@ -1663,7 +1699,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
           observationIds: results.map(o => o.id),
         });
         res.status(200).json({
-          observations: results.map(serializeObservation),
+          observations: results.map(serializerFor(req)),
           context,
           count: results.length,
         });
@@ -1697,7 +1733,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
             mode: 'search', via: 'mcp', query, limit,
             resultCount: rows.length, observationIds: rows.map(o => o.id),
           });
-          return rows.map(serializeObservation);
+          return rows.map(serializerFor(req));
         },
         timeline: async ({ projectId, anchorId, depthBefore, depthAfter }) => {
           assertProjectAllowed(projectId);
@@ -1705,7 +1741,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
           await this.auditWrite(req, 'observation.read', anchorId, projectId, {
             mode: 'timeline', via: 'mcp', resultCount: rows.length,
           });
-          return rows.map(serializeObservation);
+          return rows.map(serializerFor(req));
         },
         getObservations: async ({ projectId, ids }) => {
           assertProjectAllowed(projectId);
@@ -1713,7 +1749,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
           await this.auditWrite(req, 'observation.read', null, projectId, {
             mode: 'selected', via: 'mcp', resultCount: rows.length, observationIds: rows.map(row => row.id),
           });
-          return rows.map(serializeObservation);
+          return rows.map(serializerFor(req));
         },
         context: async ({ projectId, query, limit }) => {
           assertProjectAllowed(projectId);
@@ -1723,7 +1759,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
             mode: 'context', via: 'mcp', query, limit,
             resultCount: rows.length, observationIds: rows.map(o => o.id),
           });
-          return rows.map(serializeObservation);
+          return rows.map(serializerFor(req));
         },
         recent: async ({ projectId, limit }) => {
           assertProjectAllowed(projectId);
@@ -1732,7 +1768,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
             mode: 'recent', via: 'mcp', limit,
             resultCount: rows.length, observationIds: rows.map(o => o.id),
           });
-          return rows.map(serializeObservation);
+          return rows.map(serializerFor(req));
         },
       };
       const server = createRecallMcpServer(backend, MCP_SERVER_VERSION);
@@ -1962,6 +1998,23 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         ? normalizePlatformSource(value)
         : null,
     };
+  }
+
+  /**
+   * A read's author filter: 'mine' is the asking key, 'others' every other
+   * key, anything else a key label of the team (case ignored). {} for no
+   * filter; null when the label names no key, which reads as nothing.
+   */
+  private async authorFilter(req: Request, teamId: string, author: string | undefined): Promise<{ authorOnly?: string; authorExcept?: string } | null> {
+    if (author === undefined) return {};
+    const viewer = req.authContext?.apiKeyId ?? null;
+    if (author === 'mine') return viewer ? { authorOnly: viewer } : null;
+    if (author === 'others') return viewer ? { authorExcept: viewer } : {};
+    const result = await this.options.pool.query<{ id: string }>(
+      `SELECT id FROM api_keys WHERE team_id = $1 AND lower(label) = lower($2) ORDER BY created_at LIMIT 1`,
+      [teamId, author],
+    );
+    return result.rows[0] ? { authorOnly: result.rows[0].id } : null;
   }
 
   /**
@@ -2755,9 +2808,11 @@ function serializeObservation(observation: {
   kind: string;
   content: string;
   metadata: Record<string, unknown>;
+  authorKeyId?: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number;
-}): Record<string, unknown> {
+}, viewerKeyId?: string | null): Record<string, unknown> {
+  const author = typeof observation.metadata?.author === 'string' ? observation.metadata.author : null;
   return {
     id: observation.id,
     projectId: observation.projectId,
@@ -2768,9 +2823,19 @@ function serializeObservation(observation: {
     kind: observation.kind,
     content: observation.content,
     metadata: observation.metadata,
+    // The writing machine's label, and whether the asking key wrote it
+    // (absent when either side has no key: rows from before authors).
+    ...(author ? { author } : {}),
+    ...(viewerKeyId && observation.authorKeyId ? { mine: observation.authorKeyId === viewerKeyId } : {}),
     createdAtEpoch: observation.createdAtEpoch,
     updatedAtEpoch: observation.updatedAtEpoch,
   };
+}
+
+/** serializeObservation for one request's key, so each row says whether that machine wrote it. */
+function serializerFor(req: Request): (observation: Parameters<typeof serializeObservation>[0]) => Record<string, unknown> {
+  const viewer = req.authContext?.apiKeyId ?? null;
+  return observation => serializeObservation(observation, viewer);
 }
 
 interface ObservationWithSourceRow {
