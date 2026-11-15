@@ -643,11 +643,10 @@ export async function runServerApiKeyCli(argv: string[]): Promise<void> {
         scopes: unknown;
         revoked_at: Date | null;
         expires_at: Date | null;
-        last_used_at: Date | null;
         created_at: Date;
         label: string | null;
       }>(
-        `SELECT id, team_id, project_id, scopes, revoked_at, expires_at, last_used_at, created_at, label
+        `SELECT id, team_id, project_id, scopes, revoked_at, expires_at, created_at, label
          FROM api_keys
          ${where}
          ORDER BY created_at DESC
@@ -666,7 +665,6 @@ export async function runServerApiKeyCli(argv: string[]): Promise<void> {
           projectId: row.project_id,
           scopes: row.scopes,
           status: row.revoked_at ? 'revoked' : 'active',
-          lastUsedAt: row.last_used_at?.toISOString() ?? null,
           expiresAt: row.expires_at?.toISOString() ?? null,
           createdAt: row.created_at.toISOString(),
         })),
