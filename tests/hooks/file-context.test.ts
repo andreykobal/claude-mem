@@ -54,6 +54,10 @@ mock.module('../../src/shared/hook-settings.js', () => ({
   loadFromFileOnce: () => ({
     CLAUDE_MEM_EXCLUDED_PROJECTS: '',
     CLAUDE_MEM_FILE_READ_GATE_ENABLED: fileReadGateSetting,
+    // The worker mock runs the REAL executeWithWorkerFallback, which starts a
+    // real worker when none answers: one in a temp data dir, running scheduled
+    // agents on the developer's Claude account. A test never may launch one.
+    CLAUDE_MEM_WORKER_AUTOSTART: 'false',
     ...runtimeSettings,
   }),
 }));
