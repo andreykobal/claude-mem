@@ -274,6 +274,18 @@ describe('observationHandler — subagent observation filtering (#2736)', () => 
     expect(spooled()).toHaveLength(0);
   });
 
+  it('sends an image a tool returned as a marker, never as base64 (server runtime has no media store)', async () => {
+    mockRuntime = serverRuntime();
+    const { observationHandler } = await import('../../../src/cli/handlers/observation.js');
+    await observationHandler.execute(baseInput({
+      toolName: 'mcp__browser__screenshot',
+      toolResponse: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo' + 'Ab3x'.repeat(2000) } }],
+    }));
+    const sent = JSON.stringify(recordEventLog[0]?.event);
+    expect(sent).toContain('[image/png 6 KB omitted]');
+    expect(sent).not.toContain('Ab3xAb3xAb3x');
+  });
+
   it('honors CLAUDE_MEM_SKIP_TOOLS on the server runtime (worker ingest never sees server events)', async () => {
     mockRuntime = serverRuntime();
     mockSettings.CLAUDE_MEM_SKIP_TOOLS = 'TodoWrite, bash';

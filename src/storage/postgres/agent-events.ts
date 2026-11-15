@@ -14,6 +14,7 @@ import {
 } from './utils.js';
 import { normalizePlatformSourceOrNull } from '../../shared/platform-source.js';
 import { redactJsonStrings } from '../../utils/redaction.js';
+import { stripInlineBinary, stripInlineBinaryDeep } from '../../shared/inline-binary.js';
 import { stripMemoryTagsFromJsonStrings } from '../../utils/tag-stripping.js';
 
 export interface PostgresAgentEvent {
@@ -104,7 +105,7 @@ export class PostgresAgentEventsRepository {
         // <private> sections are removed and opt-in secret redaction (#2616)
         // applied to the raw event body, at the one write every ingest path
         // goes through, so a client that did not strip still stores none.
-        toPostgresJson(redactJsonStrings(stripMemoryTagsFromJsonStrings(input.payload ?? {}))),
+        toPostgresJson(stripInlineBinaryDeep(redactJsonStrings(stripMemoryTagsFromJsonStrings(input.payload ?? {})))),
         toPostgresJson(redactJsonStrings(stripMemoryTagsFromJsonStrings(input.metadata ?? {}))),
         new Date(input.occurredAt)
       ]
@@ -225,7 +226,7 @@ export const TOOL_USE_PAYLOAD_MAX_BYTES = 64 * 1024;
 
 function clipPayload(value: unknown): string | null {
   if (value === null || value === undefined) return null;
-  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  const text = stripInlineBinary(typeof value === 'string' ? value : JSON.stringify(value));
   const bytes = Buffer.byteLength(text, 'utf8');
   if (bytes <= TOOL_USE_PAYLOAD_MAX_BYTES) return text;
   return `${Buffer.from(text, 'utf8').subarray(0, TOOL_USE_PAYLOAD_MAX_BYTES).toString('utf8')}…[truncated: ${bytes} bytes]`;

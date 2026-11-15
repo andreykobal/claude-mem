@@ -2,6 +2,7 @@
 // HookResult and MUST NOT call process.stderr.write / process.stdout.write /
 // console.* / process.exit. logger.* calls are DIAGNOSTIC; thrown errors are
 // caught by hookCommand, logged, and answered with a no-op (never exit 2).
+import { stripInlineBinaryDeep } from '../../shared/inline-binary.js';
 import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js';
 import { spoolHookEvent } from '../spool-hook-event.js';
 import { logger } from '../../utils/logger.js';
@@ -114,10 +115,12 @@ export const observationHandler: EventHandler = {
         sourceType: 'hook',
         eventType: 'tool_use',
         occurredAtEpoch: Date.now(),
+        // No local media store in server runtime: an image goes as a marker,
+        // never as base64 text (see shared/inline-binary.ts).
         payload: boundObservationDispatch({
           tool_name: toolName,
-          tool_input: toolInput,
-          tool_response: toolResponse,
+          tool_input: stripInlineBinaryDeep(toolInput),
+          tool_response: stripInlineBinaryDeep(toolResponse),
           cwd,
           agentId: input.agentId,
           agentType: input.agentType,

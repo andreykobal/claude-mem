@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { stripInlineBinary } from '../../../../shared/inline-binary.js';
 import { ModeManager } from '../../../../services/domain/ModeManager.js';
 import type { ModeConfig, ObservationType } from '../../../../services/domain/types.js';
 import { stripTags } from '../../../../utils/tag-stripping.js';
@@ -146,8 +147,10 @@ interface EventBlockResult {
 
 function buildEventBlock(event: PostgresAgentEvent): EventBlockResult {
   // Compact JSON: indentation is input the model doesn't need.
-  const rawPayload =
-    typeof event.payload === 'string' ? event.payload : JSON.stringify(event.payload ?? {});
+  // Events stored before inline images were stripped at ingest still carry
+  // base64; the observer gets a marker, never the body.
+  const rawPayload = stripInlineBinary(
+    typeof event.payload === 'string' ? event.payload : JSON.stringify(event.payload ?? {}));
 
   const stripResult = stripTags(rawPayload);
   const hadPrivate = (stripResult.counts.private ?? 0) > 0;

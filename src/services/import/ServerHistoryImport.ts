@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { buildServerContext, selectRuntime } from '../hooks/runtime-selector.js';
 import { DB_PATH } from '../../shared/paths.js';
+import { stripInlineBinary, stripInlineBinaryDeep } from '../../shared/inline-binary.js';
 
 /**
  * `worker-service server-import`: a machine's local history (observations and
@@ -77,6 +78,15 @@ function epochMs(value: unknown): number {
 
 /** The observation as the server's generator renders it (processGeneratedResponse). */
 export function observationItem(row: Record<string, unknown>, databaseId: string): ImportItem | null {
+  return withoutInlineBinary(observationItemRaw(row, databaseId));
+}
+
+/** History written before images were stripped carries base64: it moves as a marker. */
+function withoutInlineBinary(item: ImportItem | null): ImportItem | null {
+  return item && { ...item, content: stripInlineBinary(item.content), metadata: stripInlineBinaryDeep(item.metadata) };
+}
+
+function observationItemRaw(row: Record<string, unknown>, databaseId: string): ImportItem | null {
   const title = text(row.title);
   const subtitle = text(row.subtitle);
   const narrative = text(row.narrative) ?? text(row.text);
@@ -106,6 +116,10 @@ export function observationItem(row: Record<string, unknown>, databaseId: string
 
 /** The session summary as the server's generator renders it. */
 export function summaryItem(row: Record<string, unknown>, databaseId: string): ImportItem | null {
+  return withoutInlineBinary(summaryItemRaw(row, databaseId));
+}
+
+function summaryItemRaw(row: Record<string, unknown>, databaseId: string): ImportItem | null {
   const fields = ['request', 'investigated', 'learned', 'completed', 'next_steps', 'notes'] as const;
   const labels: Record<typeof fields[number], string> = {
     request: 'Request', investigated: 'Investigated', learned: 'Learned', completed: 'Completed', next_steps: 'Next steps', notes: 'Notes',

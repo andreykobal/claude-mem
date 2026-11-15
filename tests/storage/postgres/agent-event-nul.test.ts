@@ -55,4 +55,20 @@ describe('agent event with NUL in its payload', () => {
     });
     expect((event.payload as { tool_response: string }).tool_response).toBe('binaryoutput');
   });
+
+  it('stores an image a tool returned as a marker, from any client', async () => {
+    const storage = createPostgresStorageRepositories(pool);
+    const team = await storage.teams.create({ name: 'team' });
+    const project = await storage.projects.create({ teamId: team.id, name: 'p' });
+    const event = await storage.agentEvents.create({
+      projectId: project.id,
+      teamId: team.id,
+      sourceAdapter: 'api',
+      eventType: 'tool_use',
+      payload: { tool_response: [{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/' + 'Bc7y'.repeat(1500) } }] },
+      occurredAt: Date.now(),
+    });
+    expect(JSON.stringify(event.payload)).toContain('[image/jpeg 4 KB omitted]');
+    expect(JSON.stringify(event.payload)).not.toContain('Bc7yBc7yBc7y');
+  });
 });
