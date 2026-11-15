@@ -238,7 +238,7 @@ describe('SessionStart in server runtime (plan-24 step 4)', () => {
     // pre-joined `context` string.
     expect(additionalContext).toStartWith(`Access Claude-Mem Rules + Tools: ${join(dataDir, 'RULES-AND-TOOLS.md')}\n\n`);
     // Server runtime renders here, so the file the line points to is written here too.
-    expect(readFileSync(join(dataDir, 'RULES-AND-TOOLS.md'), 'utf-8')).toContain('Fetch details: observation_search');
+    expect(readFileSync(join(dataDir, 'RULES-AND-TOOLS.md'), 'utf-8')).toContain('Fetch details: get_observations([IDs]) (short refs work)');
     expect(additionalContext).toContain('Import no longer aborts on a bad row');
     expect(additionalContext).toContain('Stop one bad row from aborting the restore');
     expect(additionalContext).not.toContain('Fixed the import batch abort\n\nsummary body');

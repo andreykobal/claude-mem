@@ -39,11 +39,10 @@ describe('Rules + Tools file', () => {
     expect(text).toContain('# claude-mem memory use');
   });
 
-  it('names the server tools for server runtime, which has no by-id fetch', () => {
+  it('tells server runtime that get_observations resolves its short id refs', () => {
     renderHeader({ fetchByIdSupported: false }, false);
     const text = readFileSync(rulesAndToolsFilePath(), 'utf-8');
-    expect(text).toContain('Fetch details: observation_search by title');
-    expect(text).not.toContain('get_observations([IDs])');
+    expect(text).toContain('Fetch details: get_observations([IDs]) (short refs work)');
   });
 
   it('rewrites the file only when its text changes', () => {

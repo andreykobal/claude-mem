@@ -56,7 +56,9 @@ describe('MCP runtime-aware tool visibility', () => {
     expect(names.has('observation_search')).toBe(true);
     // save_memory writes to the server in server runtime (/v1/memories).
     expect(names.has('save_memory')).toBe(true);
-    expect(names.has('get_tool_uses')).toBe(false);
+    // Raw tool I/O comes from the server's agent events (/v1/tool-uses/batch).
+    expect(names.has('get_tool_uses')).toBe(true);
+    expect(names.has('dumb_search')).toBe(true);
   });
 
   it('worker runtime keeps worker-only tools', () => {

@@ -7,6 +7,8 @@ import { AppError } from '../../../services/server/ErrorHandler.js';
 import { CreateAgentEventSchema } from '../../../core/schemas/agent-event.js';
 import { withPostgresTransaction, type PostgresPool } from '../../../storage/postgres/pool.js';
 import {
+  listToolUsesForScope,
+  searchToolUsesForScope,
   PostgresAgentEventsRepository,
   type CreatePostgresAgentEventInput,
   type PostgresAgentEvent,
@@ -17,7 +19,8 @@ import {
   type PostgresObservationGenerationJob,
 } from '../../../storage/postgres/generation-jobs.js';
 import { PostgresAuthRepository } from '../../../storage/postgres/auth.js';
-import { PostgresObservationRepository } from '../../../storage/postgres/observations.js';
+import { PostgresObservationRepository, SEARCH_ORDERS, TIMELINE_MAX_DEPTH } from '../../../storage/postgres/observations.js';
+import { resolveDateBound } from '../../../shared/date-bounds.js';
 import {
   embedObservationRows,
   embedSearchQuery,
@@ -58,6 +61,9 @@ import {
 } from '../../../shared/server-context-limits.js';
 
 const SOURCE_ADAPTER_DEFAULT = 'api';
+
+/** A relevance search fuses ranked windows of at most this many rows. */
+const HYBRID_SEARCH_MAX_WINDOW = 500;
 
 // The canonical Postgres event carries native receipt identity and metadata
 // in addition to the shared SQLite event shape. Validate both HTTP forms
@@ -1048,28 +1054,78 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     // tsvector index. Results are ranked by ts_rank desc, then updated_at desc.
     // The MCP `observation_search` tool calls this endpoint via HTTP so the
     // single source of truth for the read path is the REST core.
+    // The search the MCP `search` tool makes, with the worker's filters:
+    // a query and/or filters (category, observation types and concepts, a
+    // created_at range, folder labels), relevance or date order, and paging.
     app.post('/v1/search', readAuth, this.handleCreate(
       z.object({
         projectId: z.string().min(1),
-        query: z.string().min(1),
+        projectIds: z.array(z.string().min(1)).max(20).optional(),
+        query: z.string().min(1).optional(),
         limit: z.number().int().positive().max(100).optional(),
+        offset: z.number().int().min(0).max(MAX_LISTING_OFFSET, LISTING_OFFSET_CAP_MESSAGE).optional(),
+        orderBy: z.enum(SEARCH_ORDERS).optional(),
+        dateStart: z.union([z.string().min(1), z.number()]).optional(),
+        dateEnd: z.union([z.string().min(1), z.number()]).optional(),
+        // all | observations | sessions | prompts; prompts are not stored on the server.
+        category: z.enum(['all', 'observations', 'sessions', 'prompts']).optional(),
+        observationTypes: z.array(z.string().min(1)).max(50).optional(),
+        observationConcepts: z.array(z.string().min(1)).max(50).optional(),
+        folderProjects: z.array(z.string().min(1)).min(1).max(20).optional(),
         platformSource: z.string().min(1).nullable().optional(),
-      }),
+      }).refine(body => body.query !== undefined || body.dateStart !== undefined || body.dateEnd !== undefined
+        || body.observationTypes !== undefined || body.observationConcepts !== undefined
+        || (body.category !== undefined && body.category !== 'all'),
+      { message: 'query or at least one filter is required' }),
       async (req, res, body) => {
         const teamId = this.requireTeamId(req, res);
         if (!teamId) return;
         if (!this.ensureProjectAllowed(req, res, body.projectId)) return;
         const platformSource = normalizePlatformSourceOrNull(body.platformSource);
+        const projectIds = this.allowedProjectIds(req, res, body.projectIds);
+        if (projectIds === false) return;
+        if (body.category === 'prompts' || (body.projectIds && projectIds.length === 0)) {
+          res.status(200).json({ observations: [] });
+          return;
+        }
+        const offset = body.offset ?? 0;
+        const limit = body.limit ?? 20;
+        // A hybrid read fuses ranked candidate windows; deep pages are keyword-only.
+        if (body.query && offset + limit > HYBRID_SEARCH_MAX_WINDOW && (body.orderBy ?? 'relevance') === 'relevance') {
+          res.status(400).json({ error: 'BadRequest', message: `offset + limit must be at most ${HYBRID_SEARCH_MAX_WINDOW} for a relevance search; use orderBy date_desc or date_asc to page further` });
+          return;
+        }
+        let dateStartEpoch: number | null;
+        let dateEndEpoch: number | null;
+        try {
+          dateStartEpoch = body.dateStart !== undefined ? resolveDateBound(body.dateStart, 'start') : null;
+          dateEndEpoch = body.dateEnd !== undefined ? resolveDateBound(body.dateEnd, 'end') : null;
+        } catch (error) {
+          res.status(400).json({ error: 'BadRequest', message: error instanceof Error ? error.message : 'invalid date bound' });
+          return;
+        }
+        const summary = body.category === 'sessions' ? true
+          : body.category === 'observations' || body.observationTypes !== undefined ? false
+          : undefined;
         let results;
         try {
           const repo = new PostgresObservationRepository(this.options.pool);
           results = await repo.search({
             projectId: body.projectId,
+            ...(projectIds.length ? { projectIds } : {}),
             teamId,
-            query: body.query,
-            limit: body.limit ?? 20,
+            query: body.query ?? null,
+            limit,
+            offset,
+            orderBy: body.orderBy,
+            dateStartEpoch,
+            dateEndEpoch,
+            ...(summary !== undefined ? { summary } : {}),
+            observationTypes: body.observationTypes ?? null,
+            observationConcepts: body.observationConcepts ?? null,
+            folderProjects: body.folderProjects ?? null,
             platformSource,
-            queryEmbedding: await embedSearchQuery(this.options.pool, body.query),
+            queryEmbedding: body.query ? await embedSearchQuery(this.options.pool, body.query) : null,
           });
         } catch (error) {
           const err = error instanceof Error ? error : new Error(String(error));
@@ -1079,8 +1135,9 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         }
         await this.auditWrite(req, 'observation.read', null, body.projectId, {
           mode: 'search',
-          query: body.query,
-          limit: body.limit ?? 20,
+          query: body.query ?? null,
+          limit,
+          offset,
           platformSource,
           resultCount: results.length,
           observationIds: results.map(o => o.id),
@@ -1091,37 +1148,170 @@ export class ServerV1PostgresRoutes implements RouteHandler {
       },
     ));
 
+    // Rows around an anchor: an observation id, a moment (anchorTime: ISO
+    // date or epoch ms), or the top hit for a query, as the worker's timeline
+    // takes them; depth up to the worker's cap, scoped like search.
     app.post('/v1/timeline', readAuth, this.handleCreate(
       z.object({
         projectId: z.string().trim().min(1),
-        anchorId: z.string().trim().min(1).max(256),
-        depthBefore: z.number().int().min(0).max(20).optional(),
-        depthAfter: z.number().int().min(0).max(20).optional(),
-      }).strict(),
+        projectIds: z.array(z.string().min(1)).max(20).optional(),
+        anchorId: z.string().trim().min(1).max(256).optional(),
+        anchorTime: z.union([z.string().trim().min(1), z.number()]).optional(),
+        query: z.string().trim().min(1).max(500).optional(),
+        depthBefore: z.number().int().min(0).max(TIMELINE_MAX_DEPTH).optional(),
+        depthAfter: z.number().int().min(0).max(TIMELINE_MAX_DEPTH).optional(),
+        platformSource: z.string().min(1).nullable().optional(),
+        folderProjects: z.array(z.string().min(1)).min(1).max(20).optional(),
+      }).strict().refine(
+        body => [body.anchorId, body.anchorTime, body.query].filter(value => value !== undefined).length === 1,
+        { message: 'exactly one of anchorId, anchorTime or query is required' },
+      ),
       async (req, res, body) => {
         const teamId = this.requireTeamId(req, res);
         if (!teamId || !this.ensureProjectAllowed(req, res, body.projectId)) return;
-        const rows = await new PostgresObservationRepository(this.options.pool).timelineAround({ ...body, teamId });
-        await this.auditWrite(req, 'observation.read', body.anchorId, body.projectId, {
+        const projectIds = this.allowedProjectIds(req, res, body.projectIds);
+        if (projectIds === false) return;
+        const scope = projectIds.length ? { projectIds } : {};
+        const repo = new PostgresObservationRepository(this.options.pool);
+        const platformSource = normalizePlatformSourceOrNull(body.platformSource);
+        let anchorId = body.anchorId;
+        if (body.query !== undefined) {
+          const [top] = await repo.search({
+            projectId: body.projectId, ...scope, teamId, query: body.query, limit: 1, platformSource,
+            folderProjects: body.folderProjects ?? null,
+            queryEmbedding: await embedSearchQuery(this.options.pool, body.query),
+          });
+          if (!top) {
+            res.json({ observations: [] });
+            return;
+          }
+          anchorId = top.id;
+        }
+        let anchorEpoch: number | undefined;
+        if (anchorId === undefined) {
+          try {
+            anchorEpoch = resolveDateBound(body.anchorTime!, 'start');
+          } catch (error) {
+            res.status(400).json({ error: 'BadRequest', message: error instanceof Error ? error.message : 'invalid anchor time' });
+            return;
+          }
+        }
+        const rows = await repo.timelineAround({
+          ...(anchorId !== undefined ? { anchorId } : { anchorEpoch: anchorEpoch! }),
+          projectId: body.projectId,
+          ...scope,
+          teamId,
+          ...(body.depthBefore !== undefined ? { depthBefore: body.depthBefore } : {}),
+          ...(body.depthAfter !== undefined ? { depthAfter: body.depthAfter } : {}),
+          platformSource,
+          folderProjects: body.folderProjects ?? null,
+        });
+        await this.auditWrite(req, 'observation.read', anchorId ?? null, body.projectId, {
           mode: 'timeline', resultCount: rows.length,
         });
-        res.json({ observations: rows.map(serializeObservation) });
+        res.json({ observations: rows.map(serializeObservation), ...(anchorId ? { anchorId } : {}) });
       },
     ));
 
     app.post('/v1/observations/batch', readAuth, this.handleCreate(
       z.object({
         projectId: z.string().trim().min(1),
+        projectIds: z.array(z.string().min(1)).max(20).optional(),
         ids: z.array(z.string().trim().min(1).max(256)).min(1).max(100),
+        orderBy: z.enum(['date_desc', 'date_asc']).optional(),
+        limit: z.number().int().positive().max(100).optional(),
+        platformSource: z.string().min(1).nullable().optional(),
+        folderProjects: z.array(z.string().min(1)).min(1).max(20).optional(),
       }).strict(),
       async (req, res, body) => {
         const teamId = this.requireTeamId(req, res);
         if (!teamId || !this.ensureProjectAllowed(req, res, body.projectId)) return;
-        const rows = await new PostgresObservationRepository(this.options.pool).getManyForScope({ ...body, teamId });
+        const projectIds = this.allowedProjectIds(req, res, body.projectIds);
+        if (projectIds === false) return;
+        const rows = await new PostgresObservationRepository(this.options.pool).getManyForScope({
+          ids: body.ids,
+          projectId: body.projectId,
+          ...(projectIds.length ? { projectIds } : {}),
+          teamId,
+          ...(body.orderBy ? { orderBy: body.orderBy } : {}),
+          ...(body.limit !== undefined ? { limit: body.limit } : {}),
+          platformSource: normalizePlatformSourceOrNull(body.platformSource),
+          folderProjects: body.folderProjects ?? null,
+        });
         await this.auditWrite(req, 'observation.read', null, body.projectId, {
           mode: 'selected', resultCount: rows.length, observationIds: rows.map(row => row.id),
         });
         res.json({ observations: rows.map(serializeObservation) });
+      },
+    ));
+
+    // The team's project names (CLAUDE_MEM_CONTEXT_PROJECTS=all in server
+    // runtime). A project-scoped key sees only its own project.
+    app.get('/v1/projects', readAuth, this.asyncHandler(async (req, res) => {
+      const teamId = this.requireTeamId(req, res);
+      if (!teamId) return;
+      const scoped = req.authContext?.projectId ?? null;
+      const result = await this.options.pool.query<{ id: string; name: string }>(
+        `SELECT id, name FROM projects WHERE team_id = $1 AND ($2::text IS NULL OR id = $2) ORDER BY name, id LIMIT 1000`,
+        [teamId, scoped],
+      );
+      res.json({ projects: result.rows });
+    }));
+
+    // search(deep): raw tool calls matching every query term, for when the
+    // observations found nothing.
+    app.post('/v1/tool-uses/search', readAuth, this.handleCreate(
+      z.object({
+        projectId: z.string().trim().min(1),
+        projectIds: z.array(z.string().min(1)).max(20).optional(),
+        query: z.string().trim().min(1).max(500),
+        limit: z.number().int().positive().max(10).optional(),
+        platformSource: z.string().min(1).nullable().optional(),
+      }).strict(),
+      async (req, res, body) => {
+        const teamId = this.requireTeamId(req, res);
+        if (!teamId || !this.ensureProjectAllowed(req, res, body.projectId)) return;
+        const projectIds = this.allowedProjectIds(req, res, body.projectIds);
+        if (projectIds === false) return;
+        const toolUses = await searchToolUsesForScope(this.options.pool, {
+          projectIds: projectIds.length ? projectIds : [body.projectId],
+          teamId,
+          query: body.query,
+          limit: body.limit ?? 10,
+          platformSource: normalizePlatformSourceOrNull(body.platformSource),
+        });
+        await this.auditWrite(req, 'observation.read', null, body.projectId, {
+          mode: 'tool-uses-search', resultCount: toolUses.length,
+        });
+        res.json({ toolUses });
+      },
+    ));
+
+    // get_tool_uses: the raw input and output of selected tool calls, by
+    // event id, tool_use_id, or the id of an observation they produced.
+    app.post('/v1/tool-uses/batch', readAuth, this.handleCreate(
+      z.object({
+        projectId: z.string().trim().min(1),
+        ids: z.array(z.string().trim().min(1).max(256)).min(1).max(100),
+        limit: z.number().int().positive().max(200).optional(),
+        contentSessionId: z.string().min(1).optional(),
+        platformSource: z.string().min(1).nullable().optional(),
+      }).strict(),
+      async (req, res, body) => {
+        const teamId = this.requireTeamId(req, res);
+        if (!teamId || !this.ensureProjectAllowed(req, res, body.projectId)) return;
+        const toolUses = await listToolUsesForScope(this.options.pool, {
+          projectId: body.projectId,
+          teamId,
+          ids: body.ids,
+          limit: body.limit ?? 100,
+          contentSessionId: body.contentSessionId ?? null,
+          platformSource: normalizePlatformSourceOrNull(body.platformSource),
+        });
+        await this.auditWrite(req, 'observation.read', null, body.projectId, {
+          mode: 'tool-uses', resultCount: toolUses.length,
+        });
+        res.json({ toolUses });
       },
     ));
 
@@ -1170,6 +1360,10 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     app.post('/v1/context', readAuth, this.handleCreate(
       z.object({
         projectId: z.string().min(1),
+        // Read several projects of the team at once (a worktree and its
+        // parent; CLAUDE_MEM_CONTEXT_PROJECTS=all). Names resolve like
+        // projectId; unknown names read as empty.
+        projectIds: z.array(z.string().min(1)).max(20).optional(),
         // Optional: a context request with no query asks for the most RECENT
         // observations, which is what a session-start block actually wants.
         query: z.string().min(1).optional(),
@@ -1200,6 +1394,13 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         const teamId = this.requireTeamId(req, res);
         if (!teamId) return;
         if (!this.ensureProjectAllowed(req, res, body.projectId)) return;
+        const projectIds = body.projectIds?.length ? body.projectIds : undefined;
+        for (const id of projectIds ?? []) if (!this.ensureProjectAllowed(req, res, id)) return;
+        if (body.projectIds && !projectIds) {
+          // Every named project is unknown: nothing to read.
+          res.status(200).json({ observations: [], context: '' });
+          return;
+        }
         const platformSource = normalizePlatformSourceOrNull(body.platformSource);
         const limit = body.limit
           ?? (body.query ? SERVER_CONTEXT_QUERY_DEFAULT_LIMIT : SERVER_CONTEXT_RECENT_DEFAULT_LIMIT);
@@ -1210,6 +1411,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
           // scope as the ordinary mixed read, with filtering before LIMIT.
           const searchInput = {
             projectId: body.projectId,
+            ...(projectIds ? { projectIds } : {}),
             teamId,
             query: body.query ?? null,
             limit,
@@ -1694,6 +1896,16 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         ? normalizePlatformSource(value)
         : null,
     };
+  }
+
+  /**
+   * The resolved projectIds of a read naming several projects, each allowed
+   * for the key; [] when none were named or none exist; false once refused.
+   */
+  private allowedProjectIds(req: Request, res: Response, projectIds: string[] | undefined): string[] | false {
+    const ids = projectIds ?? [];
+    for (const id of ids) if (!this.ensureProjectAllowed(req, res, id)) return false;
+    return ids;
   }
 
   private ensureProjectAllowed(req: Request, res: Response, projectId: string): boolean {

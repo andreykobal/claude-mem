@@ -166,8 +166,19 @@ export interface ServerAddObservationResponse {
 // Phase 8 — full-text search over generated observations.
 export interface ServerSearchObservationsRequest {
   projectId: string;
-  query: string;
+  /** Several projects at once (a worktree and its parent), as `name:<project>`. */
+  projectIds?: string[];
+  /** Optional when a filter is set (a filter-only read is newest first). */
+  query?: string;
   limit?: number;
+  offset?: number;
+  orderBy?: 'relevance' | 'date_desc' | 'date_asc';
+  dateStart?: string | number;
+  dateEnd?: string | number;
+  category?: 'all' | 'observations' | 'sessions' | 'prompts';
+  observationTypes?: string[];
+  observationConcepts?: string[];
+  folderProjects?: string[];
   platformSource?: string | null;
 }
 
@@ -184,6 +195,8 @@ export interface ServerSearchObservationsResponse {
 // matched observations AND a pre-joined `context` string.
 export interface ServerContextObservationsRequest {
   projectId: string;
+  /** Several projects at once (names as `name:<project>`); projectId still names the caller's own. */
+  projectIds?: string[];
   // OPTIONAL, and the whole session-start read depends on it being optional.
   // With a query the route is FTS and answers by relevance; with the key ABSENT
   // it answers by recency, which is what a session-start block is. An empty
@@ -217,13 +230,25 @@ export interface ServerContextObservationsResponse {
 
 export interface ServerTimelineRequest {
   projectId: string;
-  anchorId: string;
+  projectIds?: string[];
+  /** Exactly one of anchorId, anchorTime (ISO date or epoch ms) and query. */
+  anchorId?: string;
+  anchorTime?: string | number;
+  query?: string;
   depthBefore?: number;
   depthAfter?: number;
+  platformSource?: string | null;
+  folderProjects?: string[];
 }
 export interface ServerSelectedObservationsRequest {
   projectId: string;
+  projectIds?: string[];
   ids: string[];
+  /** Input order when absent. */
+  orderBy?: 'date_desc' | 'date_asc';
+  limit?: number;
+  platformSource?: string | null;
+  folderProjects?: string[];
 }
 
 // Per-prompt injection (CLAUDE_MEM_SEMANTIC_INJECT): observations near the
@@ -369,6 +394,7 @@ export class ServerClient {
     // /v1/search contract, where a query is genuinely required, and widening it
     // would let a search ship without one.
     const payload: Record<string, unknown> = { projectId: input.projectId };
+    if (input.projectIds && input.projectIds.length > 0) payload.projectIds = input.projectIds;
     if (input.query !== undefined) payload.query = input.query;
     if (input.limit !== undefined) payload.limit = input.limit;
     if (input.summaryLimit !== undefined) payload.summaryLimit = input.summaryLimit;
@@ -412,6 +438,25 @@ export class ServerClient {
     if (input.platformSource !== undefined) payload.platformSource = input.platformSource;
     if (input.folderProjects && input.folderProjects.length > 0) payload.folderProjects = input.folderProjects;
     return this.request<ServerSearchObservationsResponse>('POST', '/v1/observations/by-file', payload, options);
+  }
+
+  // The team's project names (CLAUDE_MEM_CONTEXT_PROJECTS=all).
+  async listProjects(options: ServerRequestOptions = {}): Promise<{ projects: Array<{ id: string; name: string }> }> {
+    return this.request<{ projects: Array<{ id: string; name: string }> }>('GET', '/v1/projects', undefined, options);
+  }
+
+  // MCP search(deep): raw tool calls matching the query when observations found nothing.
+  async searchToolUses(input: {
+    projectId: string; projectIds?: string[]; query: string; limit?: number; platformSource?: string | null;
+  }): Promise<{ toolUses: unknown[] }> {
+    return this.request<{ toolUses: unknown[] }>('POST', '/v1/tool-uses/search', input);
+  }
+
+  // MCP get_tool_uses: raw tool I/O by event id, tool_use_id or observation id.
+  async toolUses(input: {
+    projectId: string; ids: string[]; limit?: number; contentSessionId?: string; platformSource?: string | null;
+  }): Promise<{ toolUses: unknown[] }> {
+    return this.request<{ toolUses: unknown[] }>('POST', '/v1/tool-uses/batch', input);
   }
 
   // MCP work_state_write / work_state_read and the SessionStart work-state
@@ -484,13 +529,20 @@ export class ServerClient {
     };
   }
 
-  buildSearchPayload(
-    input: { projectId: string; query: string; limit?: number; platformSource?: string | null },
-  ): Record<string, unknown> {
+  buildSearchPayload(input: ServerSearchObservationsRequest): Record<string, unknown> {
     return {
       projectId: input.projectId,
-      query: input.query,
+      ...(input.projectIds?.length ? { projectIds: input.projectIds } : {}),
+      ...(input.query !== undefined ? { query: input.query } : {}),
       ...(input.limit !== undefined ? { limit: input.limit } : {}),
+      ...(input.offset !== undefined ? { offset: input.offset } : {}),
+      ...(input.orderBy !== undefined ? { orderBy: input.orderBy } : {}),
+      ...(input.dateStart !== undefined ? { dateStart: input.dateStart } : {}),
+      ...(input.dateEnd !== undefined ? { dateEnd: input.dateEnd } : {}),
+      ...(input.category !== undefined ? { category: input.category } : {}),
+      ...(input.observationTypes?.length ? { observationTypes: input.observationTypes } : {}),
+      ...(input.observationConcepts?.length ? { observationConcepts: input.observationConcepts } : {}),
+      ...(input.folderProjects?.length ? { folderProjects: input.folderProjects } : {}),
       ...(input.platformSource !== undefined ? { platformSource: normalizePlatformSourceField(input.platformSource) } : {}),
     };
   }

@@ -254,7 +254,7 @@ describe('session-start context from the shared store', () => {
     expect(stats!.observation_count).toBeGreaterThan(0);
   });
 
-  it('prints 8-char display refs, and its Rules + Tools file points at observation_search, since server ids have no by-id fetch', async () => {
+  it('prints 8-char display refs, which get_observations resolves, as its Rules + Tools file says', async () => {
     respond = async () => ({
       observations: [
         observationRow(3),
@@ -272,8 +272,7 @@ describe('session-start context from the shared store', () => {
     expect(text).toContain('Sabcdef12 Ship the import fix');
     expect(text).not.toContain('abcdef12-5048');
     const rulesAndTools = readFileSync(rulesAndToolsFilePath(), 'utf-8');
-    expect(rulesAndTools).toContain('Fetch details: observation_search');
-    expect(rulesAndTools).not.toContain('get_observations([IDs])');
+    expect(rulesAndTools).toContain('Fetch details: get_observations([IDs]) (short refs work)');
   });
 
   it('renders the empty state for an empty answer', async () => {

@@ -38,13 +38,13 @@ export type McpToolName = typeof MCP_TOOL_NAMES[number];
 const native = { kind: 'native' } as const;
 
 export const MCP_TOOL_SERVER_SUPPORT: Record<McpToolName, ServerSupport> = {
-  dumb_search: { kind: 'gap', why: 'raw tool-use search reads the local tool_uses table' },
+  dumb_search: native,
   save_memory: native,
   important_workflow: native,
   search: native,
   timeline: native,
   get_observations: native,
-  get_tool_uses: { kind: 'gap', why: 'raw tool I/O reads the local tool_uses table' },
+  get_tool_uses: native,
   work_state_write: native,
   work_state_read: native,
   team_brief: { kind: 'skip', why: 'TeamBrain is the hosted cmem.ai service, not this server' },

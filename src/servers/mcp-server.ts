@@ -70,7 +70,7 @@ import { withCheckoutProjects } from './checkout-search-scope.js';
 import { parseProjectList, projectsQueryValues } from '../shared/project-list.js';
 import { postCorpusRequestOverSse } from './corpus-worker-stream.js';
 import { withWorkerRestartOnRefusedConnection } from './worker-restart.js';
-import { ProgressiveSearchError, progressiveSearchToolError } from '../shared/progressive-search.js';
+import { ProgressiveSearch, ProgressiveSearchError, progressiveSearchToolError, progressiveSearchToolResult, projectMemoryContent, type MemoryIndexRow, type ProgressiveBackend } from '../shared/progressive-search.js';
 import { formatMcpPayload, formatWorkerMcpResponse, formatWorkStateMcpResponse, mcpTextResult, workerFailureText, serverFailureText, type McpTextPurpose } from './mcp-text-format.js';
 import { getRequestCwd, runWithCwd } from './request-context.js';
 import { isProjectExcluded } from '../utils/project-filter.js';
@@ -525,6 +525,18 @@ function serverContextForProject(project: string): ServerRuntimeContext | null {
     : ctx;
 }
 
+/**
+ * The checkout's project keys as server project references when the read is
+ * for this checkout and it has several (a worktree and its parent), so ids a
+ * search returns from the parent open in timeline and get_observations too.
+ */
+function checkoutProjectIds(runtime: ServerRuntimeContext, explicitProject: unknown): string[] | undefined {
+  if (typeof explicitProject === 'string' && explicitProject.trim()) return undefined;
+  if (!runtime.projectId.startsWith(SERVER_PROJECT_NAME_REF_PREFIX)) return undefined;
+  const keys = currentCheckout().allProjects;
+  return keys.length > 1 ? keys.slice(-20).map(key => `${SERVER_PROJECT_NAME_REF_PREFIX}${key}`) : undefined;
+}
+
 function serverConfigIncompleteText(toolName: string): string {
   return `${toolName}: server runtime is selected but CLAUDE_MEM_SERVER_URL or CLAUDE_MEM_SERVER_API_KEY is missing in ~/.claude-mem/settings.json.`;
 }
@@ -590,6 +602,100 @@ async function serverSaveMemory(args: { text?: unknown; title?: unknown; project
   } catch (error) {
     return formatToolError(error);
   }
+}
+
+const SEARCH_CATEGORIES = new Set(['all', 'observations', 'sessions', 'prompts']);
+const SEARCH_ORDER_VALUES = new Set(['relevance', 'date_desc', 'date_asc']);
+
+function csvList(value: unknown): string[] {
+  const items = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [];
+  return items.map(item => String(item).trim()).filter(Boolean);
+}
+
+/**
+ * The worker's search arguments as a server search: `type` is a category
+ * (observations, sessions, prompts, all) or else an observation type, as the
+ * worker reads it (resolveTypeFilters); `obs_type` and `concepts` take comma
+ * lists; `project` picks the server project, as the hooks name it.
+ */
+function serverSearchRequest(args: Record<string, unknown>):
+  | { project: string; search: Omit<import('../services/hooks/server-client.js').ServerSearchObservationsRequest, 'projectId'> }
+  | { error: string } {
+  const query = typeof args.query === 'string' && args.query.trim() ? args.query : undefined;
+  const type = typeof args.type === 'string' ? args.type.trim() : '';
+  const category = SEARCH_CATEGORIES.has(type) ? type as 'all' | 'observations' | 'sessions' | 'prompts' : undefined;
+  const observationTypes = [...csvList(args.obs_type), ...(type && !category ? csvList(type) : [])];
+  const observationConcepts = csvList(args.concepts ?? args.concept);
+  const orderBy = typeof args.orderBy === 'string' ? args.orderBy : undefined;
+  if (orderBy !== undefined && !SEARCH_ORDER_VALUES.has(orderBy)) {
+    return { error: 'orderBy must be relevance, date_desc or date_asc.' };
+  }
+  const dateStart = args.dateStart ?? args.date_start ?? args.date_from;
+  const dateEnd = args.dateEnd ?? args.date_end ?? args.date_to;
+  const hasFilter = observationTypes.length > 0 || observationConcepts.length > 0 || dateStart !== undefined
+    || dateEnd !== undefined || (category !== undefined && category !== 'all');
+  if (!query && !hasFilter) return { error: 'Search needs a query or a filter (type, obs_type, concepts, dateStart, dateEnd).' };
+  const number = (value: unknown) => value === undefined || value === null || value === '' ? undefined : Number(value);
+  const limit = number(args.limit);
+  const offset = number(args.offset);
+  return {
+    project: typeof args.project === 'string' && args.project.trim() ? args.project.trim() : currentCheckout().primary,
+    search: {
+      ...(query ? { query } : {}),
+      ...(limit !== undefined && Number.isFinite(limit) ? { limit: Math.min(100, Math.max(1, Math.floor(limit))) } : {}),
+      ...(offset !== undefined && Number.isFinite(offset) ? { offset: Math.max(0, Math.floor(offset)) } : {}),
+      ...(orderBy ? { orderBy: orderBy as 'relevance' | 'date_desc' | 'date_asc' } : {}),
+      ...(dateStart !== undefined ? { dateStart: dateStart as string | number } : {}),
+      ...(dateEnd !== undefined ? { dateEnd: dateEnd as string | number } : {}),
+      ...(category ? { category } : {}),
+      ...(observationTypes.length ? { observationTypes } : {}),
+      ...(observationConcepts.length ? { observationConcepts } : {}),
+      ...(args.platformSource !== undefined ? { platformSource: normalizeMcpPlatformSource(args.platformSource as string | null) } : {}),
+    },
+  };
+}
+
+/**
+ * dumb_search's three steps over the server (search, timeline, selected
+ * details), in the contract the worker's ProgressiveMemorySearch implements.
+ * The project is the server project of `project`; rows carry their folder label.
+ */
+function serverProgressiveBackend(runtime: ServerRuntimeContext, project: string): ProgressiveBackend {
+  type Row = { id: string; content?: string; kind?: unknown; metadata?: unknown; createdAtEpoch?: unknown };
+  const meta = (row: Row) => (row.metadata && typeof row.metadata === 'object' ? row.metadata : {}) as Record<string, unknown>;
+  const toIndex = (row: Row): MemoryIndexRow => {
+    const data = meta(row);
+    const title = typeof data.title === 'string' && data.title.trim() ? data.title
+      : typeof data.request === 'string' && data.request.trim() ? data.request
+      : String(row.content ?? '').split('\n')[0] ?? '';
+    return {
+      id: String(row.id),
+      kind: row.kind === 'summary' ? 'summary' : 'observation',
+      project: typeof data.project === 'string' && data.project ? data.project : project,
+      title,
+      createdAt: typeof row.createdAtEpoch === 'number' ? row.createdAtEpoch : null,
+      type: typeof row.kind === 'string' ? row.kind : null,
+    };
+  };
+  return {
+    async search({ query, limit }) {
+      const response = await runtime.client.searchObservations({ projectId: runtime.projectId, query, limit: Math.max(limit, 100) });
+      return (response.observations ?? []).map(row => toIndex(row as Row));
+    },
+    async timeline({ anchor, depthBefore, depthAfter }) {
+      const response = await runtime.client.timelineObservations({ projectId: runtime.projectId, anchorId: anchor.id, depthBefore, depthAfter });
+      return (response.observations ?? []).map(row => toIndex(row as Row));
+    },
+    async fetch(refs) {
+      if (refs.length === 0) return [];
+      const response = await runtime.client.selectedObservations({ projectId: runtime.projectId, ids: refs.map(ref => ref.id) });
+      return (response.observations ?? []).map(row => {
+        const index = toIndex(row as Row);
+        const { text, truncated } = projectMemoryContent({ ...meta(row as Row), narrative: meta(row as Row).narrative ?? (row as Row).content });
+        return { ...index, content: text, truncated };
+      });
+    },
+  };
 }
 
 /** work_state_write in server runtime: the row goes to the server project this checkout's hooks write to. */
@@ -710,7 +816,11 @@ const tools: McpToolDefinition[] = [
     handler: async (args: any) => {
       try {
         if (selectRuntime() === 'server') {
-          throw new ProgressiveSearchError('unsupported_runtime', 'Use the hosted claude-mem MCP connection for server memory, or select worker runtime for local dumb_search.');
+          const project = typeof args?.project === 'string' && args.project.trim() ? args.project.trim() : currentCheckout().primary;
+          const runtime = serverContextForProject(project);
+          if (!runtime) throw new ProgressiveSearchError('unsupported_runtime', serverConfigIncompleteText('dumb_search'));
+          const result = await new ProgressiveSearch(serverProgressiveBackend(runtime, project)).run(args ?? {});
+          return progressiveSearchToolResult(result);
         }
         const body = withCheckoutProjects(args ?? {}, currentCheckout());
         const response = await withWorkerRestartOnRefusedConnection(() => workerHttpRequest('/api/dumb-search', {
@@ -760,7 +870,8 @@ NEVER fetch full details without filtering first: an index row is ~50-100 tokens
       properties: {}
     },
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
-    handler: async () => selectRuntime() === 'server' ? mcpTextResult('Smart search (default): 1. search({query}) for the server index. 2. timeline({anchor: ID}) for context around interesting results. 3. get_observations({ids}) for only records selected after reviewing the index and timeline. These tools use the configured server project; optional projectId selects another authorized server project. No auto or guided modes. Dumb search is unavailable in this runtime.') : ({
+    // One workflow in both runtimes: the server takes the same tools and filters.
+    handler: async () => ({
       content: [{
         type: 'text' as const,
         text: `# Smart Search (Default)
@@ -815,20 +926,34 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
     handler: async (args: any) => {
       if (selectRuntime() === 'server') {
-        if (args?.deep !== undefined && args.deep !== false) return mcpTextResult('Raw-tool deep search is local-only; no local worker request was made.', true);
-        const ctx = requireServerForObservationTool('search');
-        const unsupported = ['project', 'obs_type', 'dateStart', 'dateEnd', 'offset', 'orderBy']
-          .filter(key => args?.[key] !== undefined);
-        if (unsupported.length || (args?.type !== undefined && args.type !== 'observations')) {
-          return mcpTextResult('Server search supports query, projectId, limit, and platformSource. Remove unsupported local filters; this request was not sent to the local worker.', true);
+        const request = serverSearchRequest(args ?? {});
+        if ('error' in request) return mcpTextResult(request.error, true);
+        const runtime = serverContextForProject(request.project);
+        if (!runtime) return mcpTextResult(serverConfigIncompleteText('search'), true);
+        try {
+          const projectIds = args.projectId ? undefined : checkoutProjectIds(runtime, args.project);
+          const projectId = typeof args.projectId === 'string' && args.projectId.trim() ? args.projectId : runtime.projectId;
+          const found = await runtime.client.searchObservations({
+            ...request.search,
+            projectId,
+            ...(projectIds ? { projectIds } : {}),
+          });
+          // deep: with no observation match on the first page, raw tool calls
+          // that contain the query (the worker's tool_uses_fts fallback).
+          if (args.deep === true && (found.observations ?? []).length === 0 && !request.search.offset && request.search.query) {
+            const raw = await runtime.client.searchToolUses({
+              projectId, ...(projectIds ? { projectIds } : {}), query: request.search.query, limit: 10,
+              ...(request.search.platformSource !== undefined ? { platformSource: request.search.platformSource } : {}),
+            });
+            if ((raw.toolUses ?? []).length > 0) {
+              const formatted = formatMcpPayload('tool-uses', raw);
+              return mcpTextResult(`No observation matched; raw tool calls containing the query (deep):\n\n${formatted.content[0].text}`);
+            }
+          }
+          return formatMcpPayload('server-search', found);
+        } catch (error) {
+          return workStateServerError(error);
         }
-        if (typeof args?.query !== 'string' || !args.query.trim()) return mcpTextResult('Server search requires a nonempty query.', true);
-        return formatMcpPayload('server-search', await ctx.client.searchObservations({
-          projectId: args.projectId || ctx.projectId,
-          query: args.query,
-          ...(args.limit !== undefined ? { limit: args.limit } : {}),
-          ...(args.platformSource !== undefined ? { platformSource: normalizeMcpPlatformSource(args.platformSource) } : {}),
-        }));
       }
       return await callWorker('/api/search', { query: withCheckoutProjects(args ?? {}, currentCheckout()) });
     }
@@ -851,14 +976,27 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
     handler: async (args: any) => {
       if (selectRuntime() === 'server') {
-        const ctx = requireServerForObservationTool('timeline');
-        if ((typeof args?.anchor !== 'string' && typeof args?.anchor !== 'number') || !String(args.anchor).trim()) return mcpTextResult('Server timeline requires an anchor ID from search.', true);
-        if (args?.project !== undefined || args?.query !== undefined) return mcpTextResult('Server timeline uses anchor and optional projectId; local project and query arguments are unsupported.', true);
-        return formatMcpPayload('server-timeline', await ctx.client.timelineObservations({
-          projectId: args.projectId || ctx.projectId, anchorId: String(args.anchor),
-          ...(args.depth_before !== undefined ? { depthBefore: args.depth_before } : {}),
-          ...(args.depth_after !== undefined ? { depthAfter: args.depth_after } : {}),
-        }));
+        const anchor = args?.anchor !== undefined && args.anchor !== null ? String(args.anchor).trim().replace(/^#/, '') : '';
+        const query = typeof args?.query === 'string' ? args.query.trim() : '';
+        if (Boolean(anchor) === Boolean(query)) return mcpTextResult('Timeline needs either an anchor (an ID from search, or a date/time) or a query, not both.', true);
+        const runtime = serverContextForProject(typeof args?.project === 'string' && args.project.trim() ? args.project.trim() : currentCheckout().primary);
+        if (!runtime) return mcpTextResult(serverConfigIncompleteText('timeline'), true);
+        // A moment (ISO date or epoch ms) anchors by time, as the worker's timeline does.
+        const anchorIsTime = /^\d{4}-\d{2}-\d{2}/.test(anchor) || /^\d{10,}$/.test(anchor);
+        const depth = (value: unknown) => value === undefined ? undefined : Math.min(50, Math.max(0, Math.floor(Number(value))));
+        try {
+          const projectIds = args.projectId ? undefined : checkoutProjectIds(runtime, args.project);
+          return formatMcpPayload('server-timeline', await runtime.client.timelineObservations({
+            projectId: args.projectId || runtime.projectId,
+            ...(projectIds ? { projectIds } : {}),
+            ...(query ? { query } : anchorIsTime ? { anchorTime: anchor } : { anchorId: anchor }),
+            ...(args.depth_before !== undefined ? { depthBefore: depth(args.depth_before) } : {}),
+            ...(args.depth_after !== undefined ? { depthAfter: depth(args.depth_after) } : {}),
+            ...(args.platformSource !== undefined ? { platformSource: normalizeMcpPlatformSource(args.platformSource) } : {}),
+          }));
+        } catch (error) {
+          return workStateServerError(error);
+        }
       }
       return await callWorker('/api/timeline', { query: withCheckoutProjects(args ?? {}, currentCheckout()) });
     }
@@ -883,10 +1021,23 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
     handler: async (args: any) => {
       if (selectRuntime() === 'server') {
-        const ctx = requireServerForObservationTool('get_observations');
         if (!Array.isArray(args?.ids) || !args.ids.length || args.ids.some((id: unknown) => (typeof id !== 'string' && typeof id !== 'number') || !String(id).trim())) return mcpTextResult('Select nonempty observation IDs from search and timeline.', true);
-        if (args?.project !== undefined || args?.orderBy !== undefined || args?.limit !== undefined) return mcpTextResult('Server get_observations uses ids and optional projectId; local filters are unsupported.', true);
-        return formatMcpPayload('observations', await ctx.client.selectedObservations({ projectId: args.projectId || ctx.projectId, ids: args.ids.map(String) }));
+        if (args?.orderBy !== undefined && args.orderBy !== 'date_desc' && args.orderBy !== 'date_asc') return mcpTextResult('orderBy must be date_desc or date_asc.', true);
+        const runtime = serverContextForProject(typeof args?.project === 'string' && args.project.trim() ? args.project.trim() : currentCheckout().primary);
+        if (!runtime) return mcpTextResult(serverConfigIncompleteText('get_observations'), true);
+        try {
+          const projectIds = args.projectId ? undefined : checkoutProjectIds(runtime, args.project);
+          return formatMcpPayload('observations', await runtime.client.selectedObservations({
+            projectId: args.projectId || runtime.projectId,
+            ...(projectIds ? { projectIds } : {}),
+            ids: args.ids.map((id: unknown) => String(id).trim().replace(/^#/, '')),
+            ...(args.orderBy ? { orderBy: args.orderBy } : {}),
+            ...(args.limit !== undefined ? { limit: Math.min(100, Math.max(1, Math.floor(Number(args.limit)))) } : {}),
+            ...(args.platformSource !== undefined ? { platformSource: normalizeMcpPlatformSource(args.platformSource) } : {}),
+          }));
+        } catch (error) {
+          return workStateServerError(error);
+        }
       }
       return await callWorker('/api/observations/batch', { body: withCheckoutProjects(args ?? {}, currentCheckout()) });
     }
@@ -912,7 +1063,22 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
     },
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
     handler: async (args: any) => {
-      if (selectRuntime() === 'server') return mcpTextResult('Raw tool I/O is unavailable in server runtime. Use selected server observations; no local worker request was made.', true);
+      if (selectRuntime() === 'server') {
+        if (!Array.isArray(args?.ids) || !args.ids.length) return mcpTextResult('Select tool-call or observation IDs first (search, timeline, get_observations).', true);
+        const runtime = serverContextForProject(typeof args?.project === 'string' && args.project.trim() ? args.project.trim() : currentCheckout().primary);
+        if (!runtime) return mcpTextResult(serverConfigIncompleteText('get_tool_uses'), true);
+        try {
+          return formatMcpPayload('tool-uses', await runtime.client.toolUses({
+            projectId: args.projectId || runtime.projectId,
+            ids: args.ids.slice(0, 100).map((id: unknown) => String(id).trim().replace(/^#/, '')),
+            ...(args.limit !== undefined ? { limit: Math.min(200, Math.max(1, Math.floor(Number(args.limit)))) } : {}),
+            ...(typeof args.contentSessionId === 'string' ? { contentSessionId: args.contentSessionId } : {}),
+            ...(args.platformSource !== undefined ? { platformSource: normalizeMcpPlatformSource(args.platformSource) } : {}),
+          }));
+        } catch (error) {
+          return workStateServerError(error);
+        }
+      }
       return await callWorker('/api/tool-uses/batch', { body: withCheckoutProjects(args ?? {}, currentCheckout()) });
     }
   },

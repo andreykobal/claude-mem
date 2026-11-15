@@ -280,15 +280,37 @@ async function renderSessionStartFromServer(
  * Any catalog failure falls back to this checkout. The server runtime has no
  * local catalog, so it keeps this checkout.
  */
+/** Projects one server SessionStart read can name (folderProjects / projectIds cap). */
+const SERVER_CONTEXT_MAX_PROJECTS = 20;
+
 export async function resolveSessionStartProjects(
   settings: { CLAUDE_MEM_CONTEXT_PROJECTS?: string; CLAUDE_MEM_EXCLUDED_PROJECTS?: string },
   checkoutProjects: string[],
   runtime: 'worker' | 'server',
+  serverRuntime?: ServerRuntimeContext | null,
 ): Promise<string[]> {
   if (settings.CLAUDE_MEM_CONTEXT_PROJECTS !== 'all') return checkoutProjects;
   if (runtime === 'server') {
-    logger.debug('HOOK', 'CLAUDE_MEM_CONTEXT_PROJECTS=all is not supported in server runtime');
-    return checkoutProjects;
+    // The server's project catalog; each name is read as its own server project.
+    if (!serverRuntime) return checkoutProjects;
+    try {
+      const { projects } = await serverRuntime.client.listProjects({ timeoutMs: 2_000 });
+      const excludedPatterns = settings.CLAUDE_MEM_EXCLUDED_PROJECTS ?? '';
+      const lowerCheckout = new Set(checkoutProjects.map(project => project.toLowerCase()));
+      const others = (projects ?? [])
+        .map(project => project.name)
+        .filter((name): name is string => typeof name === 'string' && name.length > 0)
+        .filter(name => !lowerCheckout.has(name.toLowerCase()) && !isProjectExcluded(name, excludedPatterns))
+        .sort();
+      // One server read names at most 20 projects (the route's folder cap); the checkout's own come first to stay.
+      const room = Math.max(0, SERVER_CONTEXT_MAX_PROJECTS - checkoutProjects.length);
+      return [...(room > 0 ? others.slice(-room) : []), ...checkoutProjects];
+    } catch (error) {
+      logger.debug('HOOK', 'Server project catalog unavailable; SessionStart reads this checkout only', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return checkoutProjects;
+    }
   }
   try {
     const catalog = await executeWithWorkerFallback<{ projects?: unknown }>('/api/projects', 'GET', undefined, {
@@ -456,7 +478,7 @@ export const contextHandler: EventHandler = {
     // exactly as the write hooks do, so reads and writes stay on one corpus.
     const serverRuntime = runtime.runtime === 'server' ? runtime : null;
 
-    const scopeProjects = await resolveSessionStartProjects(settings, context.allProjects, runtime.runtime);
+    const scopeProjects = await resolveSessionStartProjects(settings, context.allProjects, runtime.runtime, serverRuntime);
     const projectsQuery = projectsQueryString(scopeProjects);
     const normalizedPlatformSource = input.platform
       ? normalizePlatformSource(input.platform)

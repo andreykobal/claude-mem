@@ -299,7 +299,7 @@ describe('server beta postgres observation storage', () => {
       .toEqual([created[2].id, created[0].id]);
     expect(await storage.observations.getManyForScope({ ...scope, teamId: foreign.project.teamId, ids: [created[1].id] })).toEqual([]);
     expect(await storage.observations.getManyForScope({ ...scope, ids: [] })).toEqual([]);
-    await expect(storage.observations.timelineAround({ ...scope, anchorId: created[1].id, depthBefore: 21 })).rejects.toThrow('depth');
+    await expect(storage.observations.timelineAround({ ...scope, anchorId: created[1].id, depthBefore: 51 })).rejects.toThrow('depth');
   });
 
   it('matches any term of a question, rare terms first, by bm25 on postgres-pgvector-textsearch', async () => {

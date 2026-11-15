@@ -28,9 +28,40 @@ export function parseProjectNameRef(value: unknown): string | null {
   return value.slice(PROJECT_NAME_REF_PREFIX.length).trim();
 }
 
+/**
+ * A read naming several projects (`projectIds`, e.g. a worktree and its
+ * parent, or every project for CLAUDE_MEM_CONTEXT_PROJECTS=all): each
+ * `name:<project>` becomes the team's project id; names with no project are
+ * dropped, so they read as empty. Reads only: a list never creates projects.
+ */
+async function resolveProjectIdList(pool: PostgresPool, teamId: string, values: unknown[]): Promise<string[]> {
+  const repo = new PostgresProjectsRepository(pool);
+  const ids: string[] = [];
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const name = parseProjectNameRef(value);
+    if (name === null) { ids.push(value); continue; }
+    if (!name || name.length > PROJECT_NAME_REF_MAX_LENGTH) continue;
+    const project = await repo.getByNameForTeam(name, teamId);
+    if (project) ids.push(project.id);
+  }
+  return [...new Set(ids)];
+}
+
 export function projectNameResolver(pool: PostgresPool, options: { create: boolean }): RequestHandler {
   return async (req, res, next) => {
-    const name = parseProjectNameRef((req.body as { projectId?: unknown } | undefined)?.projectId);
+    const body = req.body as { projectId?: unknown; projectIds?: unknown } | undefined;
+    if (!options.create && Array.isArray(body?.projectIds) && req.authContext?.teamId) {
+      try {
+        (body as { projectIds: string[] }).projectIds = await resolveProjectIdList(pool, req.authContext.teamId, body!.projectIds as unknown[]);
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        logger.warn('SYSTEM', 'project name list could not be resolved', { requestId: req.requestId ?? null }, err);
+        res.status(503).json({ error: 'ServiceUnavailable', message: 'project names could not be resolved' });
+        return;
+      }
+    }
+    const name = parseProjectNameRef(body?.projectId);
     if (name === null) return next();
     if (!name || name.length > PROJECT_NAME_REF_MAX_LENGTH) {
       res.status(400).json({ error: 'BadRequest', message: `projectId name reference must be 1-${PROJECT_NAME_REF_MAX_LENGTH} characters` });

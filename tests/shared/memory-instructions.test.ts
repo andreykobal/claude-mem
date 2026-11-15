@@ -16,14 +16,14 @@ describe('runtime-specific memory instructions', () => {
     expect(text).toContain('get_observations({ids})');
     expect(text).not.toContain('Server runtime:');
   });
-  it('does not direct server recall into the local corpus', () => {
+  it('points server recall at the server, with the same tools as the worker', () => {
     const text = memoryInstructionsForRuntime('server');
-    expect(text).toContain('search({query})');
-    expect(text).toContain('timeline({anchor: ID})');
+    expect(text).toContain('against the server');
+    expect(text).toContain('search({query, project})');
     expect(text).toContain('get_observations({ids})');
-    expect(text).toContain('configured server project');
-    expect(text).not.toContain('search({query, project})');
-    expect(text).not.toContain('timeline({anchor})');
+    expect(text).toContain('server project');
+    expect(text).not.toContain('Worker runtime:');
+    expect(text).not.toContain('unavailable');
     expect(MEMORY_PLUGIN_INSTRUCTIONS).toContain('Worker runtime:');
     expect(MEMORY_PLUGIN_INSTRUCTIONS).toContain('Server runtime:');
   });

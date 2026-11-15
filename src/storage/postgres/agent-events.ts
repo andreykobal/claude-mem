@@ -205,3 +205,105 @@ function mapAgentEventRow(row: AgentEventRow): PostgresAgentEvent {
     createdAtEpoch: toEpoch(row.created_at)
   };
 }
+
+/** One tool call's raw input and output, as get_tool_uses shows it. */
+export interface PostgresToolUse {
+  id: string;
+  tool_use_id: string | null;
+  tool_name: string | null;
+  tool_input: string | null;
+  tool_response: string | null;
+  cwd: string | null;
+  platform_source: string | null;
+  content_session_id: string | null;
+  observation_id: string | null;
+  created_at_epoch: number;
+}
+
+/** A raw payload is clipped at the worker's MAX_TOOL_PAYLOAD_BYTES, with the same marker. */
+export const TOOL_USE_PAYLOAD_MAX_BYTES = 64 * 1024;
+
+function clipPayload(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  const bytes = Buffer.byteLength(text, 'utf8');
+  if (bytes <= TOOL_USE_PAYLOAD_MAX_BYTES) return text;
+  return `${Buffer.from(text, 'utf8').subarray(0, TOOL_USE_PAYLOAD_MAX_BYTES).toString('utf8')}…[truncated: ${bytes} bytes]`;
+}
+
+/**
+ * search(deep): tool calls whose raw input or output contains every query
+ * term, newest first, when the observations found nothing (the worker's
+ * tool_uses_fts fallback). Terms are matched as literal substrings.
+ */
+export async function searchToolUsesForScope(
+  client: PostgresQueryable,
+  input: { projectIds: string[]; teamId: string; query: string; limit: number; platformSource?: string | null },
+): Promise<PostgresToolUse[]> {
+  const terms = [...new Set(input.query.toLowerCase().split(/\s+/).filter(term => term.length >= 2))].slice(0, 8);
+  if (terms.length === 0) return [];
+  const patterns = terms.map(term => `%${term.replace(/[\\%_]/g, character => `\\${character}`)}%`);
+  const result = await client.query<{ id: string }>(
+    `SELECT e.id FROM agent_events e
+     WHERE e.project_id = ANY($1::text[]) AND e.team_id = $2 AND e.event_type = 'tool_use'
+       AND ($4::text IS NULL OR e.platform_source = $4)
+       AND lower(e.payload::text) LIKE ALL($3::text[])
+     ORDER BY e.occurred_at DESC, e.id DESC
+     LIMIT $5`,
+    [input.projectIds, input.teamId, patterns, input.platformSource ?? null, input.limit],
+  );
+  const ids = result.rows.map(row => row.id);
+  if (ids.length === 0) return [];
+  const rows: PostgresToolUse[] = [];
+  for (const projectId of input.projectIds) {
+    rows.push(...await listToolUsesForScope(client, { projectId, teamId: input.teamId, ids, limit: input.limit }));
+  }
+  return rows.sort((a, b) => b.created_at_epoch - a.created_at_epoch).slice(0, input.limit);
+}
+
+/**
+ * Tool calls in the caller's scope, by event id, by the host's tool_use_id, or
+ * by an observation they produced (observation_sources), oldest first.
+ */
+export async function listToolUsesForScope(
+  client: PostgresQueryable,
+  input: { projectId: string; teamId: string; ids: string[]; limit: number; contentSessionId?: string | null; platformSource?: string | null },
+): Promise<PostgresToolUse[]> {
+  if (input.ids.length === 0) return [];
+  const result = await client.query<{
+    id: string; payload: Record<string, unknown> | null; platform_source: string | null;
+    content_session_id: string | null; observation_id: string | null; occurred_at: Date;
+  }>(
+    `SELECT DISTINCT ON (e.occurred_at, e.id)
+       e.id, e.payload, e.platform_source, e.occurred_at,
+       COALESCE(NULLIF(s.content_session_id, ''), s.external_session_id) AS content_session_id,
+       os.observation_id
+     FROM agent_events e
+     LEFT JOIN server_sessions s
+       ON s.id = e.server_session_id AND s.project_id = e.project_id AND s.team_id = e.team_id
+     LEFT JOIN observation_sources os
+       ON os.agent_event_id = e.id AND os.source_type = 'agent_event'
+     WHERE e.project_id = $1 AND e.team_id = $2 AND e.event_type = 'tool_use'
+       AND (e.id = ANY($3::text[]) OR e.payload->>'tool_use_id' = ANY($3::text[]) OR os.observation_id = ANY($3::text[]))
+       AND ($4::text IS NULL OR s.content_session_id = $4 OR s.external_session_id = $4)
+       AND ($5::text IS NULL OR e.platform_source = $5)
+     ORDER BY e.occurred_at, e.id
+     LIMIT $6`,
+    [input.projectId, input.teamId, input.ids, input.contentSessionId ?? null, input.platformSource ?? null, input.limit],
+  );
+  return result.rows.map(row => {
+    const payload = row.payload ?? {};
+    return {
+      id: row.id,
+      tool_use_id: typeof payload.tool_use_id === 'string' ? payload.tool_use_id : null,
+      tool_name: typeof payload.tool_name === 'string' ? payload.tool_name : null,
+      tool_input: clipPayload(payload.tool_input),
+      tool_response: clipPayload(payload.tool_response),
+      cwd: typeof payload.cwd === 'string' ? payload.cwd : null,
+      platform_source: row.platform_source,
+      content_session_id: row.content_session_id,
+      observation_id: row.observation_id,
+      created_at_epoch: toEpoch(row.occurred_at),
+    };
+  });
+}

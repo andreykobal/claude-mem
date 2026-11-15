@@ -175,12 +175,11 @@ describe('raw-tool deep search MCP contract', () => {
     });
   }, 30_000);
 
-  it('rejects server deep search before any local or server search request', async () => {
+  it('sends server deep search to the server, never to the local worker', async () => {
     await withServer('server', async (client, requests) => {
-      const result = await client.callTool({ name: 'search', arguments: { query: 'DB_CONN_1042', deep: true } });
-      expect(result.isError).toBe(true);
-      expect(JSON.stringify(result)).toContain('local-only');
-      expect(requests.filter(r => /search|tool-uses/.test(r.path))).toEqual([]);
+      await client.callTool({ name: 'search', arguments: { query: 'DB_CONN_1042', deep: true } });
+      expect(requests.filter(r => r.path.startsWith('/api/'))).toEqual([]);
+      expect(requests.some(r => r.path === '/v1/search')).toBe(true);
     });
   }, 30_000);
 });

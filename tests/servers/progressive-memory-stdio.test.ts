@@ -195,9 +195,10 @@ describe('built local MCP Dumb search stdio integration', () => {
         }
       }
       const workflow = modelText(await client.callTool({ name: 'important_workflow', arguments: {} }) as CallToolResult);
-      expect(workflow).toContain('1. search({query})');
-      expect(workflow).toContain('2. timeline({anchor: ID})');
-      expect(workflow).toContain('3. get_observations({ids})');
+      // One workflow text in both runtimes: the server takes the same tools.
+      expect(workflow).toContain('1. **Search**');
+      expect(workflow).toContain('2. **Timeline**');
+      expect(workflow).toContain('3. **Fetch**');
       const timeline = modelText(await client.callTool({ name: 'timeline', arguments: { anchor: 'memory-fixture', depth_before: 2, depth_after: 1 } }) as CallToolResult);
       expect(timeline).toContain('#memory-fixture — A server decision');
       expect(timeline).toContain('PRIVATE_SERVER_NARRATIVE');
@@ -208,24 +209,17 @@ describe('built local MCP Dumb search stdio integration', () => {
         { path: '/v1/timeline', body: { projectId: 'project-fixture', anchorId: 'memory-fixture', depthBefore: 2, depthAfter: 1 } },
         { path: '/v1/observations/batch', body: { projectId: 'project-fixture', ids: ['memory-fixture'] } },
       ]);
-      for (const unsupported of [
+      // The worker's arguments work against the server too: a project, a
+      // timeline by query, raw tool I/O and dumb_search, never the local worker.
+      for (const call of [
         { name: 'search', arguments: { query: 'decision', project: 'local-project' } },
         { name: 'timeline', arguments: { query: 'decision' } },
         { name: 'get_observations', arguments: { ids: ['memory-fixture'], project: 'local-project' } },
-        { name: 'get_tool_uses', arguments: { ids: ['memory-fixture'] } },
+        { name: 'dumb_search', arguments: { query: 'decision' } },
       ]) {
-        const denied = await client.callTool(unsupported) as CallToolResult;
-        expect(denied.isError).toBe(true);
+        await client.callTool(call);
       }
       expect(localReads).toBe(0);
-      // The server runtime no longer advertises dumb_search (covered by
-      // tests/servers/mcp-runtime-tool-visibility.test.ts against the source).
-      // This suite drives the committed plugin/scripts/mcp-server.cjs, which is
-      // rebuilt at release, so the listing is not asserted here. A direct call
-      // still explains why the tool is unavailable.
-      const unavailable = await client.callTool({ name: 'dumb_search', arguments: { query: 'decision' } }) as CallToolResult;
-      expect(unavailable.isError).toBe(true);
-      expect(modelText(unavailable)).toContain('hosted claude-mem MCP');
       // save_memory writes to the server in server runtime, never the local worker.
       const note = await client.callTool({ name: 'save_memory', arguments: { text: 'A server-scoped note.' } }) as CallToolResult;
       expect(note.isError).toBeFalsy();

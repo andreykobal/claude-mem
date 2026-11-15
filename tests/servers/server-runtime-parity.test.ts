@@ -19,9 +19,9 @@ import { MCP_TOOL_NAMES, MCP_TOOL_SERVER_SUPPORT, type McpToolName } from '../..
 const ARGS: Partial<Record<McpToolName, Record<string, unknown>>> = {
   dumb_search: { query: 'deploy' },
   save_memory: { text: 'Parity note' },
-  search: { query: 'deploy' },
-  timeline: { anchor: 'obs-1' },
-  get_observations: { ids: ['obs-1'] },
+  search: { query: 'deploy', obs_type: 'bugfix', dateStart: '2026-01-01', orderBy: 'date_desc', offset: 0, deep: true },
+  timeline: { query: 'deploy', depth_before: 5 },
+  get_observations: { ids: ['obs-1'], orderBy: 'date_desc', limit: 5 },
   get_tool_uses: { ids: ['obs-1'] },
   work_state_write: { list: 'parity', fields: { task: 'check', status: 'todo' } },
   work_state_read: {},
@@ -63,6 +63,9 @@ describe('server runtime parity over MCP stdio', () => {
       entries: [{ id: 1, projectId: 'p', list: req.body.list, fields: req.body.fields, createdAtEpoch: Date.now() }],
     }));
     app.post('/v1/work-state/read', (_req, res) => res.json({ entries: [] }));
+    app.post('/v1/tool-uses/batch', (_req, res) => res.json({ toolUses: [{ id: 'e-1', tool_name: 'Bash', tool_input: '{"command":"ls"}', tool_response: 'a.ts' }] }));
+    app.post('/v1/tool-uses/search', (_req, res) => res.json({ toolUses: [] }));
+    app.get('/v1/projects', (_req, res) => res.json({ projects: [{ id: 'p', name: 'repo' }] }));
     const server = app.listen(0, '127.0.0.1');
     await new Promise<void>(resolve => server.once('listening', resolve));
     const { port } = server.address() as { port: number };

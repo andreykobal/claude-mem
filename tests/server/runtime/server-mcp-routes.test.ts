@@ -237,7 +237,7 @@ describe('Phase 8 MCP-backing REST endpoints (/v1/memories, /v1/search, /v1/cont
     }
     expect((await request('/v1/timeline', { projectId: foreignProject.id, anchorId: foreign.id })).status).toBe(403);
     expect((await request('/v1/observations/batch', { projectId: foreignProject.id, ids: [foreign.id] })).status).toBe(403);
-    expect((await request('/v1/timeline', { projectId, anchorId: own.id, depthBefore: 21 })).status).toBe(400);
+    expect((await request('/v1/timeline', { projectId, anchorId: own.id, depthBefore: 51 })).status).toBe(400);
     expect((await request('/v1/timeline', { projectId })).status).toBe(400);
     expect((await request('/v1/observations/batch', { projectId, ids: [] })).status).toBe(400);
     const unauthenticated = await fetch(`http://127.0.0.1:${port}/v1/timeline`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId, anchorId: own.id }) });

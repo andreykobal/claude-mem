@@ -32,15 +32,15 @@ export function rulesAndToolsPointerLine(): string {
 }
 
 /**
- * The file's text for the active mode and runtime. Server runtime has no by-id
- * fetch (fetchByIdSupported false) and its own search tools.
+ * The file's text for the active mode and runtime. Server runtime prints short
+ * id refs (fetchByIdSupported false), which get_observations resolves.
  */
 export function renderRulesAndToolsFile(fetchByIdSupported: boolean): string {
   const mode = ModeManager.getInstance().getActiveMode();
   const typeLegend = mode.observation_types.map(t => `${t.emoji}${t.id}`).join(' ');
   const fetchLine = fetchByIdSupported
     ? 'Fetch details: get_observations([IDs]) | Search: mem-search skill'
-    : 'Fetch details: observation_search by title (short refs are display-only)';
+    : 'Fetch details: get_observations([IDs]) (short refs work) | Search: mem-search skill';
   // This renderer also lives in the persistent context-reader thread. A
   // hook-lifetime snapshot would keep disabled guidance until worker restart.
   const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);

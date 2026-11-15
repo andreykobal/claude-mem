@@ -87,7 +87,7 @@ const ANY_TERM_TSQUERY_SQL = `(
 // server_sessions joined as search() joins it, and parameters $1 project,
 // $2 team, $5 platform, $6 folders, $7 excludeSubagents, $8 summary.
 const SEARCH_SCOPE_SQL = `
-  observations.project_id = $1
+  observations.project_id = ANY($1::text[])
   AND observations.team_id = $2
   AND ($8::boolean IS NULL OR (observations.kind = 'summary') = $8)
   AND (
@@ -134,6 +134,29 @@ const SEARCH_SCOPE_SQL = `
     )
   )
 `;
+
+/**
+ * SessionStart prints a server id as its first 8 characters (id-display.ts);
+ * get_observations and timeline accept that short ref as well as the full id.
+ */
+const SHORT_REF_LENGTH = 8;
+
+/** The worker's timeline depth cap (SearchManager TIMELINE_MAX_DEPTH). */
+export const TIMELINE_MAX_DEPTH = 50;
+
+export const SEARCH_ORDERS = ['relevance', 'date_desc', 'date_asc'] as const;
+export type SearchOrder = typeof SEARCH_ORDERS[number];
+
+/** created_at within the bounds (epoch ms, inclusive); a null bound is open. */
+function dateRangeSql(start: string, end: string): string {
+  return `(${start}::bigint IS NULL OR observations.created_at >= to_timestamp(${start}::bigint / 1000.0))
+    AND (${end}::bigint IS NULL OR observations.created_at <= to_timestamp(${end}::bigint / 1000.0))`;
+}
+
+function dateOrderSql(orderBy: Exclude<SearchOrder, 'relevance'>): string {
+  const direction = orderBy === 'date_asc' ? 'ASC' : 'DESC';
+  return `observations.created_at ${direction}, observations.id ${direction}`;
+}
 
 // The bind positions differ between the plain and hybrid reads. They are
 // application-owned SQL fragments; all selected mode IDs remain bound values.
@@ -241,18 +264,43 @@ export class PostgresObservationRepository {
     return row ? mapObservationRow(row) : null;
   }
 
+  /** Selected rows in the caller's scope: input order, or created_at order when asked. */
   async getManyForScope(input: {
     ids: string[];
     projectId: string;
+    projectIds?: string[];
     teamId: string;
+    orderBy?: 'date_desc' | 'date_asc';
+    limit?: number;
+    platformSource?: string | null;
+    folderProjects?: string[] | null;
   }): Promise<PostgresObservation[]> {
     const ids = [...new Set(input.ids)];
     if (ids.length === 0) return [];
+    const order = input.orderBy === 'date_asc' ? 'o.created_at ASC, o.id ASC'
+      : input.orderBy === 'date_desc' ? 'o.created_at DESC, o.id DESC'
+      : 'array_position($1::text[], o.id)';
     const result = await this.client.query<ObservationRow>(
-      `SELECT * FROM observations
-       WHERE id = ANY($1::text[]) AND project_id = $2 AND team_id = $3
-       ORDER BY array_position($1::text[], id)`,
-      [ids, input.projectId, input.teamId],
+      `SELECT o.* FROM observations o
+       WHERE (o.id = ANY($1::text[]) OR left(o.id, ${SHORT_REF_LENGTH}) = ANY($1::text[]))
+         AND o.project_id = ANY($2::text[]) AND o.team_id = $3
+         AND ($4::text IS NULL
+           OR EXISTS (SELECT 1 FROM server_sessions s WHERE s.id = o.server_session_id AND s.platform_source = $4)
+           OR (o.server_session_id IS NULL AND o.metadata->>'platformSource' = $4))
+         AND ($5::text[] IS NULL OR lower((o.metadata->>'project') COLLATE "C") = ANY(
+           SELECT lower(folder COLLATE "C") FROM unnest($5::text[]) AS folder))
+       ORDER BY ${order === 'array_position($1::text[], o.id)'
+         ? `COALESCE(array_position($1::text[], o.id), array_position($1::text[], left(o.id, ${SHORT_REF_LENGTH})))`
+         : order}
+       LIMIT $6`,
+      [
+        ids,
+        input.projectIds?.length ? input.projectIds : [input.projectId],
+        input.teamId,
+        normalizePlatformSourceOrNull(input.platformSource),
+        input.folderProjects?.length ? input.folderProjects : null,
+        input.limit ?? ids.length,
+      ],
     );
     return result.rows.map(mapObservationRow);
   }
@@ -287,7 +335,7 @@ export class PostgresObservationRepository {
        ORDER BY observations.created_at DESC, observations.id DESC
        LIMIT $4`,
       [
-        input.projectId,
+        [input.projectId],
         input.teamId,
         input.paths,
         input.limit,
@@ -301,36 +349,71 @@ export class PostgresObservationRepository {
   }
 
   /** Resolve the anchor inside the caller's scope before reading its neighbors. */
+  /**
+   * Rows around an anchor in created_at order, inside the caller's scope: the
+   * anchor observation (anchorId) or a moment (anchorEpoch, which is not a row
+   * itself). Neighbours are filtered by platform and folder labels as search()
+   * filters them.
+   */
   async timelineAround(input: {
-    anchorId: string;
+    anchorId?: string;
+    anchorEpoch?: number;
     projectId: string;
+    projectIds?: string[];
     teamId: string;
     depthBefore?: number;
     depthAfter?: number;
+    platformSource?: string | null;
+    folderProjects?: string[] | null;
   }): Promise<PostgresObservation[]> {
     const depthBefore = input.depthBefore ?? 3;
     const depthAfter = input.depthAfter ?? 3;
     for (const depth of [depthBefore, depthAfter]) {
-      if (!Number.isInteger(depth) || depth < 0 || depth > 20) throw new Error('Timeline depth must be an integer from 0 to 20');
+      if (!Number.isInteger(depth) || depth < 0 || depth > TIMELINE_MAX_DEPTH) {
+        throw new Error(`Timeline depth must be an integer from 0 to ${TIMELINE_MAX_DEPTH}`);
+      }
     }
+    const byTime = input.anchorId === undefined;
+    if (byTime && (input.anchorEpoch === undefined || !Number.isFinite(input.anchorEpoch))) {
+      throw new Error('Timeline needs an anchor id or an anchor time');
+    }
+    const scope = `o.project_id = ANY($2::text[]) AND o.team_id = $3
+      AND ($6::text IS NULL
+        OR EXISTS (SELECT 1 FROM server_sessions s WHERE s.id = o.server_session_id AND s.platform_source = $6)
+        OR (o.server_session_id IS NULL AND o.metadata->>'platformSource' = $6))
+      AND ($7::text[] IS NULL OR lower((o.metadata->>'project') COLLATE "C") = ANY(
+        SELECT lower(folder COLLATE "C") FROM unnest($7::text[]) AS folder))`;
+    const anchor = byTime
+      ? `SELECT to_timestamp($1::bigint / 1000.0) AS created_at, ''::text AS id`
+      : `SELECT * FROM observations
+         WHERE (id = $1 OR left(id, ${SHORT_REF_LENGTH}) = $1) AND project_id = ANY($2::text[]) AND team_id = $3
+         ORDER BY (id = $1) DESC, created_at DESC LIMIT 1`;
     const result = await this.client.query<ObservationRow>(
       `WITH anchor AS (
-         SELECT * FROM observations WHERE id = $1 AND project_id = $2 AND team_id = $3
+         ${anchor}
        ), preceding AS (
          SELECT o.* FROM observations o, anchor a
-         WHERE o.project_id = $2 AND o.team_id = $3
+         WHERE ${scope}
            AND (o.created_at, o.id) < (a.created_at, a.id)
          ORDER BY o.created_at DESC, o.id DESC LIMIT $4
        ), following AS (
          SELECT o.* FROM observations o, anchor a
-         WHERE o.project_id = $2 AND o.team_id = $3
+         WHERE ${scope}
            AND (o.created_at, o.id) > (a.created_at, a.id)
          ORDER BY o.created_at, o.id LIMIT $5
        )
        SELECT * FROM (
-         SELECT * FROM preceding UNION ALL SELECT * FROM anchor UNION ALL SELECT * FROM following
+         SELECT * FROM preceding${byTime ? '' : ' UNION ALL SELECT * FROM anchor'} UNION ALL SELECT * FROM following
        ) context ORDER BY created_at, id`,
-      [input.anchorId, input.projectId, input.teamId, depthBefore, depthAfter],
+      [
+        byTime ? Math.floor(input.anchorEpoch!) : input.anchorId,
+        input.projectIds?.length ? input.projectIds : [input.projectId],
+        input.teamId,
+        depthBefore,
+        depthAfter,
+        normalizePlatformSourceOrNull(input.platformSource),
+        input.folderProjects?.length ? input.folderProjects : null,
+      ],
     );
     return result.rows.map(mapObservationRow);
   }
@@ -381,6 +464,8 @@ export class PostgresObservationRepository {
   // it, or without a query, the read is the keyword/recency one below.
   async search(input: {
     projectId: string;
+    /** Several projects of the team (a worktree and its parent, or all); projectId when absent. */
+    projectIds?: string[];
     teamId: string;
     query?: string | null;
     limit?: number;
@@ -392,19 +477,33 @@ export class PostgresObservationRepository {
     summary?: boolean;
     observationTypes?: string[] | null;
     observationConcepts?: string[] | null;
+    /** created_at bounds, epoch ms, inclusive. */
+    dateStartEpoch?: number | null;
+    dateEndEpoch?: number | null;
+    /** relevance (default; newest first without a query) or created_at order. */
+    orderBy?: SearchOrder;
+    /** Rows to skip; bounded by the caller (MAX_LISTING_OFFSET, HYBRID_MAX_WINDOW). */
+    offset?: number;
   }): Promise<PostgresObservation[]> {
     const platformSource = normalizePlatformSourceOrNull(input.platformSource);
+    const offset = Math.max(0, input.offset ?? 0);
+    const orderBy = input.orderBy ?? 'relevance';
+    const dateStart = input.dateStartEpoch ?? null;
+    const dateEnd = input.dateEndEpoch ?? null;
+    const projectIds = input.projectIds?.length ? input.projectIds : [input.projectId];
     const query = input.query && input.query.trim().length > 0 ? input.query : null;
     const folderProjects = input.folderProjects && input.folderProjects.length > 0
       ? input.folderProjects
       : null;
     if (query && input.queryEmbedding) {
-      const legCandidates = Math.max(HYBRID_LEG_CANDIDATES, input.limit ?? 20);
-      return this.searchHybrid([
-        input.projectId,
+      // The fused window covers the skipped rows too; the page is cut after.
+      const window = (input.limit ?? 20) + offset;
+      const legCandidates = Math.max(HYBRID_LEG_CANDIDATES, window);
+      const rows = await this.searchHybrid([
+        projectIds,
         input.teamId,
         query,
-        input.limit ?? 20,
+        window,
         platformSource,
         folderProjects,
         input.excludeSubagents === true,
@@ -415,7 +514,10 @@ export class PostgresObservationRepository {
         input.queryEmbedding.model,
         input.observationTypes ?? null,
         input.observationConcepts ?? null,
-      ]);
+        dateStart,
+        dateEnd,
+      ], orderBy);
+      return rows.slice(offset);
     }
     // On postgres-pgvector-textsearch, a query matches any of its terms,
     // ranked by bm25 through the pg_textsearch index's scan, which scores rows
@@ -423,7 +525,9 @@ export class PostgresObservationRepository {
     // again outside the index, at milliseconds a row. The scan yields rows with
     // no query term last, scored 0, once the matches run out; matches_query
     // marks those to drop. Elsewhere the query is unchanged.
-    const bm25 = query !== null && usesBm25Index(this.client);
+    // A date order reads every match in date order; the bm25 scan yields rows
+    // in score order, so it serves only the relevance order.
+    const bm25 = query !== null && orderBy === 'relevance' && usesBm25Index(this.client);
     // A query written with web-search syntax (a quoted phrase, -term, or) keeps
     // the websearch_to_tsquery match it always had, so phrases, exclusions and
     // alternatives still mean what they say; bm25 only ranks those matches.
@@ -442,16 +546,19 @@ export class PostgresObservationRepository {
           AND server_sessions.team_id = observations.team_id
         WHERE ${SEARCH_SCOPE_SQL}
           AND ${observationModeFilterSql('$9', '$10')}
+          AND ${dateRangeSql('$11', '$12')}
           ${bm25MatchesAnyTerm ? '' : "AND ($3::text IS NULL OR observations.content_search @@ websearch_to_tsquery('english', $3))"}
-        ORDER BY ${bm25
+        ORDER BY ${orderBy !== 'relevance'
+          ? dateOrderSql(orderBy)
+          : bm25
           ? bm25Order('$3')
           : `CASE WHEN $3::text IS NULL THEN observations.created_at END DESC,
           ts_rank(observations.content_search, websearch_to_tsquery('english', $3)) DESC,
           observations.updated_at DESC`}
-        LIMIT $4
+        LIMIT $4 OFFSET $13
       `,
       [
-        input.projectId,
+        projectIds,
         input.teamId,
         query,
         input.limit ?? 20,
@@ -461,6 +568,9 @@ export class PostgresObservationRepository {
         input.summary ?? null,
         input.observationTypes ?? null,
         input.observationConcepts ?? null,
+        dateStart,
+        dateEnd,
+        offset,
       ]
     );
     return result.rows.filter(row => !bm25MatchesAnyTerm || row.matches_query).map(mapObservationRow);
@@ -476,8 +586,8 @@ export class PostgresObservationRepository {
   // an observation by its nearest part. Only parts from the query's own model
   // are compared: while rows are re-embedded after a model change, the others
   // are in another model's space, where distance means nothing.
-  private async searchHybrid(params: unknown[]): Promise<PostgresObservation[]> {
-    const scopeSql = `${SEARCH_SCOPE_SQL} AND ${observationModeFilterSql('$13', '$14')}`;
+  private async searchHybrid(params: unknown[], orderBy: SearchOrder = 'relevance'): Promise<PostgresObservation[]> {
+    const scopeSql = `${SEARCH_SCOPE_SQL} AND ${observationModeFilterSql('$13', '$14')} AND ${dateRangeSql('$15', '$16')}`;
     // The bm25 candidates come in the index scan's order, numbered as they
     // come; the score is not named outside ORDER BY, so the scan is not
     // rescored (see search()). The LIMIT keeps the planner from pushing the
@@ -524,7 +634,7 @@ export class PostgresObservationRepository {
     // drops can fill the cutoff and leave none of the rows it keeps.
     const [, , , , platformSource, folderProjects, excludeSubagents, summary] = params;
     const narrowed = platformSource !== null || folderProjects !== null || excludeSubagents === true || summary !== null
-      || params[12] !== null || params[13] !== null;
+      || params[12] !== null || params[13] !== null || params[14] !== null || params[15] !== null;
     const sql = `
       WITH ${keyword},
       nearest AS (${narrowed
@@ -536,12 +646,12 @@ export class PostgresObservationRepository {
           ON server_sessions.id = observations.server_session_id
           AND server_sessions.project_id = observations.project_id
           AND server_sessions.team_id = observations.team_id
-        WHERE e.project_id = $1 AND e.team_id = $2 AND e.model = $12 AND ${scopeSql}
+        WHERE e.project_id = ANY($1::text[]) AND e.team_id = $2 AND e.model = $12 AND ${scopeSql}
         ORDER BY e.embedding <=> $10::vector`
         : `
         SELECT observation_id, embedding <=> $10::vector AS distance
         FROM observation_embeddings
-        WHERE project_id = $1 AND team_id = $2 AND model = $12
+        WHERE project_id = ANY($1::text[]) AND team_id = $2 AND model = $12
         ORDER BY embedding <=> $10::vector`}
         LIMIT $11
       ),
@@ -575,7 +685,7 @@ export class PostgresObservationRepository {
         ON server_sessions.id = observations.server_session_id
         AND server_sessions.project_id = observations.project_id
         AND server_sessions.team_id = observations.team_id
-      ORDER BY fused.score DESC, observations.updated_at DESC
+      ORDER BY ${orderBy === 'relevance' ? 'fused.score DESC, observations.updated_at DESC' : dateOrderSql(orderBy)}
       LIMIT $4
     `;
     // An HNSW scan returns at most hnsw.ef_search rows (default 40), so the

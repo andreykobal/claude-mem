@@ -17,7 +17,7 @@
 
 import { logger } from '../../utils/logger.js';
 import { SERVER_CONTEXT_MAX_LIMIT } from '../../shared/server-context-limits.js';
-import type { ServerRuntimeContext } from '../hooks/runtime-selector.js';
+import { SERVER_PROJECT_NAME_REF_PREFIX, type ServerRuntimeContext } from '../hooks/runtime-selector.js';
 import { SUMMARY_LOOKAHEAD, type ContextConfig, type Observation, type SessionSummary } from './types.js';
 
 export interface ServerContextRows {
@@ -67,8 +67,15 @@ export async function fetchServerContextRows(
 
   let rows: ServerRow[];
   try {
+    // Hooks name projects (`name:<project>`), so a scope of several project
+    // keys (a worktree and its parent, CLAUDE_MEM_CONTEXT_PROJECTS=all) reads
+    // each one's server project; a configured project id holds them all.
+    const projectIds = runtime.projectId.startsWith(SERVER_PROJECT_NAME_REF_PREFIX) && folderProjects.length > 1
+      ? folderProjects.slice(-20).map(name => `${SERVER_PROJECT_NAME_REF_PREFIX}${name}`)
+      : undefined;
     const result = await runtime.client.contextObservations({
       projectId: runtime.projectId,
+      ...(projectIds ? { projectIds } : {}),
       // NO `query` KEY. With one the route ranks by FTS; with the key absent it
       // returns the NEWEST, which is what a session-start block is. `query: ''`
       // is not a third option -- the route's schema rejects it (min 1 char).
