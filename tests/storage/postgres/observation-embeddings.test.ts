@@ -188,7 +188,11 @@ describe.skipIf(!vectorAvailable)('hybrid observation search', () => {
     const other = await storage.projects.create({ teamId, name: 'other' });
     // More parts than the nearest-parts limit, each nearer the query than
     // this project's indexer row: an unfiltered scan sees only these. Distinct
-    // vectors, since identical ones leave an HNSW graph with nothing to follow.
+    // vectors, since identical ones leave an HNSW graph with nothing to follow:
+    // a 30 x 15 grid over two dimensions, steps far above half precision
+    // (halfvec). Steps of 0.0001 in one dimension collapse at half precision
+    // and the graph degenerates; on real stored embeddings halfvec and vector
+    // recall alike, filtered too (measured 2026-11-15).
     const nearer = axis(1);
     nearer[10] = 0.1;
     await pool.query(
@@ -200,7 +204,8 @@ describe.skipIf(!vectorAvailable)('hybrid observation search', () => {
       `INSERT INTO observation_embeddings (observation_id, project_id, team_id, part, model, embedding)
        SELECT 'other-' || g, $1, $2, 'narrative', 'test',
          ('[' || array_to_string(array_fill(0, ARRAY[1]) || 1 || array_fill(0, ARRAY[8])
-           || (0.05 + g * 0.0001) || array_fill(0, ARRAY[373]), ',') || ']')::vector
+           || (0.05 + (g % 30) * 0.002) || ((g / 30) * 0.002)
+           || array_fill(0, ARRAY[372]), ',') || ']')::vector
        FROM generate_series(1, 450) AS g`,
       [other.id, teamId],
     );

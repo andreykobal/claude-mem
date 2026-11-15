@@ -247,9 +247,10 @@ See https://www.postgresql.org/docs/current/libpq-ssl.html for libpq SSL mode de
       INSERT INTO server_beta_schema_migrations (version, description)
       VALUES ($1, $2)
       ON CONFLICT (version) DO NOTHING
-    `,[Pf,"phase 1 postgres observation storage foundation"])}async function _3e(t){await t.query("SAVEPOINT bm25_index");try{await t.query("CREATE EXTENSION IF NOT EXISTS pg_textsearch SCHEMA public"),await t.query(`CREATE INDEX IF NOT EXISTS ${Iee} ON observations USING bm25 (content) WITH (text_config = 'english')`),await t.query(`SELECT 1 FROM observations ORDER BY ${Lf("$1")} LIMIT 1`,["probe"]),await t.query("RELEASE SAVEPOINT bm25_index"),$S.set(t,!0)}catch(e){await t.query("ROLLBACK TO SAVEPOINT bm25_index"),$S.set(t,!1),P.info("SYSTEM","pg_textsearch bm25 is not in use; keyword search ranks by ts_rank",{reason:e instanceof Error?e.message:String(e)})}}function Lf(t){return`observations.content OPERATOR(public.<@>) public.to_bm25query(${t}, '${Iee}'), observations.id`}function Mf(t){return $S.get(t)===!0}async function v3e(t,e){if((await t.query("SELECT 1 FROM pg_available_extensions WHERE name = 'vector'")).rows.length===0){P.info("SYSTEM","pgvector is not installed in this Postgres; search stays keyword-only");return}if((await t.query("SELECT 1 FROM pg_extension WHERE extname = 'vector'")).rows.length===0){await t.query("SAVEPOINT create_vector");try{await t.query("CREATE EXTENSION IF NOT EXISTS vector"),await t.query("RELEASE SAVEPOINT create_vector")}catch(l){await t.query("ROLLBACK TO SAVEPOINT create_vector"),P.warn("SYSTEM","this role cannot create the pgvector extension; search stays keyword-only until an administrator runs CREATE EXTENSION vector",{error:l instanceof Error?l.message:String(l)});return}}if((await t.query("SELECT to_regtype('vector') IS NOT NULL AS visible")).rows[0]?.visible!==!0){P.warn("SYSTEM","pgvector is installed in a schema outside the search_path; search stays keyword-only");return}if((await t.query(`SELECT string_to_array(extversion, '.')::int[] >= '{0,8,0}' AS supported
+    `,[Pf,"phase 1 postgres observation storage foundation"])}async function _3e(t){await t.query("SAVEPOINT bm25_index");try{await t.query("CREATE EXTENSION IF NOT EXISTS pg_textsearch SCHEMA public"),await t.query(`CREATE INDEX IF NOT EXISTS ${Iee} ON observations USING bm25 (content) WITH (text_config = 'english')`),await t.query(`SELECT 1 FROM observations ORDER BY ${Lf("$1")} LIMIT 1`,["probe"]),await t.query("RELEASE SAVEPOINT bm25_index"),$S.set(t,!0)}catch(e){await t.query("ROLLBACK TO SAVEPOINT bm25_index"),$S.set(t,!1),P.info("SYSTEM","pg_textsearch bm25 is not in use; keyword search ranks by ts_rank",{reason:e instanceof Error?e.message:String(e)})}}function Lf(t){return`observations.content OPERATOR(public.<@>) public.to_bm25query(${t}, '${Iee}'), observations.id`}function Mf(t){return $S.get(t)===!0}async function v3e(t,e){if((await t.query("SELECT 1 FROM pg_available_extensions WHERE name = 'vector'")).rows.length===0){P.info("SYSTEM","pgvector is not installed in this Postgres; search stays keyword-only");return}if((await t.query("SELECT 1 FROM pg_extension WHERE extname = 'vector'")).rows.length===0){await t.query("SAVEPOINT create_vector");try{await t.query("CREATE EXTENSION IF NOT EXISTS vector"),await t.query("RELEASE SAVEPOINT create_vector")}catch(c){await t.query("ROLLBACK TO SAVEPOINT create_vector"),P.warn("SYSTEM","this role cannot create the pgvector extension; search stays keyword-only until an administrator runs CREATE EXTENSION vector",{error:c instanceof Error?c.message:String(c)});return}}if((await t.query("SELECT to_regtype('vector') IS NOT NULL AS visible")).rows[0]?.visible!==!0){P.warn("SYSTEM","pgvector is installed in a schema outside the search_path; search stays keyword-only");return}if((await t.query(`SELECT string_to_array(extversion, '.')::int[] >= '{0,8,0}' AS supported
      FROM pg_extension WHERE extname = 'vector'`)).rows[0]?.supported!==!0){P.warn("SYSTEM","pgvector is older than 0.8.0; search stays keyword-only");return}let a=(await t.query(`SELECT atttypmod AS dims FROM pg_attribute
-     WHERE attrelid = to_regclass('observation_embeddings') AND attname = 'embedding' AND NOT attisdropped`)).rows[0]?.dims;a!==void 0&&a!==e&&(P.warn("SYSTEM","embedding model width changed; dropping stored vectors to re-embed them",{from:a,to:e}),await t.query("DROP TABLE observation_embeddings")),await t.query(S3e(e))}function b3e(t){let e=t;return typeof e.connect=="function"&&typeof e.release!="function"&&typeof e.totalCount=="number"&&typeof e.idleCount=="number"&&typeof e.waitingCount=="number"}var Pf,Oee,rM,Iee,$S,E3e,S3e,Nf=$(()=>{"use strict";Ie();Pf=1,Oee=["server_beta_schema_migrations","teams","projects","team_members","api_keys","audit_log","server_sessions","agent_events","observation_generation_jobs","observations","observation_sources","observation_generation_job_events","usage_events","rate_limit_counters","work_state_entries"];rM=`
+     WHERE attrelid = to_regclass('observation_embeddings') AND attname = 'embedding' AND NOT attisdropped`)).rows[0]?.dims;a!==void 0&&a!==e&&(P.warn("SYSTEM","embedding model width changed; dropping stored vectors to re-embed them",{from:a,to:e}),await t.query("DROP TABLE observation_embeddings")),(await t.query(`SELECT format_type(atttypid, atttypmod) AS type FROM pg_attribute
+     WHERE attrelid = to_regclass('observation_embeddings') AND attname = 'embedding' AND NOT attisdropped`)).rows[0]?.type?.startsWith("vector(")&&(P.info("SYSTEM","storing observation vectors at half precision (halfvec); converting the stored ones"),await t.query("DROP INDEX IF EXISTS idx_observation_embeddings_hnsw"),await t.query(`ALTER TABLE observation_embeddings ALTER COLUMN embedding TYPE halfvec(${e}) USING embedding::halfvec(${e})`)),await t.query(S3e(e))}function b3e(t){let e=t;return typeof e.connect=="function"&&typeof e.release!="function"&&typeof e.totalCount=="number"&&typeof e.idleCount=="number"&&typeof e.waitingCount=="number"}var Pf,Oee,rM,Iee,$S,E3e,S3e,Nf=$(()=>{"use strict";Ie();Pf=1,Oee=["server_beta_schema_migrations","teams","projects","team_members","api_keys","audit_log","server_sessions","agent_events","observation_generation_jobs","observations","observation_sources","observation_generation_job_events","usage_events","rate_limit_counters","work_state_entries"];rM=`
 ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS key_prefix TEXT;
 CREATE INDEX IF NOT EXISTS idx_api_keys_key_prefix ON api_keys(key_prefix);
 `;Iee="idx_observations_content_bm25",$S=new WeakMap;E3e=`
@@ -546,18 +547,18 @@ CREATE TABLE IF NOT EXISTS observation_embeddings (
   team_id TEXT NOT NULL,
   part TEXT NOT NULL,
   model TEXT NOT NULL,
-  embedding vector(${t}) NOT NULL,
+  embedding halfvec(${t}) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (observation_id, part)
 );
 CREATE INDEX IF NOT EXISTS idx_observation_embeddings_hnsw
-  ON observation_embeddings USING hnsw (embedding vector_cosine_ops);
+  ON observation_embeddings USING hnsw (embedding halfvec_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_observation_embeddings_scope
   ON observation_embeddings(team_id, project_id);
 `});function kee(t,e,r){let n=[],i=(s,o)=>{typeof o=="string"&&o.trim().length>0&&n.push({part:s,text:o})};if(t==="summary")for(let s of w3e)i(s,e[s]);else if(i("narrative",e.narrative),i("text",Pr(e.legacy).text),(Array.isArray(e.facts)?e.facts:[]).filter(o=>typeof o=="string"&&o.trim().length>0).slice(0,iM).forEach((o,a)=>i(`fact_${a}`,o)),n.length===0){let o=typeof e.title=="string"&&e.title.trim()!=="Untitled"?e.title.trim():"",a=typeof e.subtitle=="string"?e.subtitle.trim():"",l=[o,a].filter(c=>c.length>0).join(`
 `);i("title",l),r.trim()!==l&&i("content",r)}return n.length===0&&i("content",r),n}function sM(t){return`[${Array.from(t).join(",")}]`}function xee(t){let e=nM.get(t);return e||(e=t.query("SELECT to_regclass('observation_embeddings') IS NOT NULL AS present").then(r=>r.rows[0]?.present===!0),e.catch(()=>nM.delete(t)),nM.set(t,e)),e}var w3e,iM,nM,ta,Ty=$(()=>{"use strict";ui();w3e=["request","investigated","learned","completed","next_steps","notes"],iM=64;nM=new WeakMap;ta=class{constructor(e){this.client=e}client;async upsert(e){e.parts.length!==0&&await this.client.query(`
         INSERT INTO observation_embeddings (observation_id, project_id, team_id, part, model, embedding)
-        SELECT o.id, o.project_id, o.team_id, t.part, $2, t.embedding::vector
+        SELECT o.id, o.project_id, o.team_id, t.part, $2, t.embedding::halfvec
         FROM observations o, unnest($3::text[], $4::text[]) AS t(part, embedding)
         WHERE o.id = $1
         ON CONFLICT (observation_id, part) DO UPDATE SET
@@ -750,7 +751,7 @@ CREATE INDEX IF NOT EXISTS idx_observation_embeddings_scope
       )`,[,,,,s,o,a,l]=e,c=s!==null||o!==null||a===!0||l!==null||e[12]!==null||e[13]!==null||e[14]!==null||e[15]!==null,u=`
       WITH ${i},
       nearest AS (${c?`
-        SELECT e.observation_id, e.embedding <=> $10::vector AS distance
+        SELECT e.observation_id, e.embedding <=> $10::halfvec AS distance
         FROM observation_embeddings e
         INNER JOIN observations ON observations.id = e.observation_id
         LEFT JOIN server_sessions
@@ -758,11 +759,11 @@ CREATE INDEX IF NOT EXISTS idx_observation_embeddings_scope
           AND server_sessions.project_id = observations.project_id
           AND server_sessions.team_id = observations.team_id
         WHERE e.project_id = ANY($1::text[]) AND e.team_id = $2 AND e.model = $12 AND ${n}
-        ORDER BY e.embedding <=> $10::vector`:`
-        SELECT observation_id, embedding <=> $10::vector AS distance
+        ORDER BY e.embedding <=> $10::halfvec`:`
+        SELECT observation_id, embedding <=> $10::halfvec AS distance
         FROM observation_embeddings
         WHERE project_id = ANY($1::text[]) AND team_id = $2 AND model = $12
-        ORDER BY embedding <=> $10::vector`}
+        ORDER BY embedding <=> $10::halfvec`}
         LIMIT $11
       ),
       semantic AS (

@@ -102,7 +102,7 @@ export class PostgresObservationEmbeddingsRepository {
     await this.client.query(
       `
         INSERT INTO observation_embeddings (observation_id, project_id, team_id, part, model, embedding)
-        SELECT o.id, o.project_id, o.team_id, t.part, $2, t.embedding::vector
+        SELECT o.id, o.project_id, o.team_id, t.part, $2, t.embedding::halfvec
         FROM observations o, unnest($3::text[], $4::text[]) AS t(part, embedding)
         WHERE o.id = $1
         ON CONFLICT (observation_id, part) DO UPDATE SET

@@ -14,6 +14,11 @@
 # (UTC) also weekly/claude-mem-YYYY-MM-DD.dump.age. Deletion is the bucket's
 # lifecycle rules. Vectors (observation_embeddings) are left out: the server
 # recomputes them after a restore.
+#
+# Disk watch (optional): the database size is printed every run. With
+# DB_VOLUME_BYTES set (the Postgres volume, e.g. 5000000000 on Hobby), a
+# database past DB_SIZE_ALERT_PERCENT of it (default 70) fails the run after
+# the upload, so the cron shows red in Railway months before writes stop.
 set -eu
 
 for var in DATABASE_URL BACKUP_AGE_RECIPIENT R2_ENDPOINT R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY; do
@@ -59,5 +64,16 @@ upload() {
 upload "daily/claude-mem-$day.dump.age"
 if [ "$weekday" = 7 ] || [ "${BACKUP_FORCE_WEEKLY:-}" = "1" ]; then
   upload "weekly/claude-mem-$day.dump.age"
+fi
+db_bytes=$(psql "$DATABASE_URL" -tAc 'SELECT pg_database_size(current_database())' | tr -d ' ')
+echo "[backup] database size: $db_bytes bytes"
+if [ -n "${DB_VOLUME_BYTES:-}" ]; then
+  percent=$((db_bytes * 100 / DB_VOLUME_BYTES))
+  echo "[backup] database uses ${percent}% of the volume"
+  if [ "$percent" -ge "${DB_SIZE_ALERT_PERCENT:-70}" ]; then
+    echo "[backup] ALERT: the database uses ${percent}% of its volume; resize it (Pro) or trim before writes stop" >&2
+    echo "[backup] done (with disk alert)"
+    exit 2
+  fi
 fi
 echo "[backup] done"

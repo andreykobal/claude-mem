@@ -225,6 +225,20 @@ async function applyVectorSchema(client: PostgresQueryable, dims: number): Promi
     });
     await client.query('DROP TABLE observation_embeddings');
   }
+  // Vectors are stored at half precision (halfvec, 2 bytes a number): the
+  // table and its HNSW index take half the space, which a 5 GB volume needs
+  // once a few machines' history is imported, at a recall cost that does not
+  // show at this model's 384 dimensions. A table from before that is converted
+  // in place; its index is rebuilt below with the halfvec operator class.
+  const storedType = await client.query<{ type: string }>(
+    `SELECT format_type(atttypid, atttypmod) AS type FROM pg_attribute
+     WHERE attrelid = to_regclass('observation_embeddings') AND attname = 'embedding' AND NOT attisdropped`
+  );
+  if (storedType.rows[0]?.type?.startsWith('vector(')) {
+    logger.info('SYSTEM', 'storing observation vectors at half precision (halfvec); converting the stored ones');
+    await client.query('DROP INDEX IF EXISTS idx_observation_embeddings_hnsw');
+    await client.query(`ALTER TABLE observation_embeddings ALTER COLUMN embedding TYPE halfvec(${dims}) USING embedding::halfvec(${dims})`);
+  }
   await client.query(vectorSchemaSql(dims));
 }
 
@@ -550,12 +564,12 @@ CREATE TABLE IF NOT EXISTS observation_embeddings (
   team_id TEXT NOT NULL,
   part TEXT NOT NULL,
   model TEXT NOT NULL,
-  embedding vector(${dims}) NOT NULL,
+  embedding halfvec(${dims}) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (observation_id, part)
 );
 CREATE INDEX IF NOT EXISTS idx_observation_embeddings_hnsw
-  ON observation_embeddings USING hnsw (embedding vector_cosine_ops);
+  ON observation_embeddings USING hnsw (embedding halfvec_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_observation_embeddings_scope
   ON observation_embeddings(team_id, project_id);
 `;

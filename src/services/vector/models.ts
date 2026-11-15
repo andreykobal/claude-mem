@@ -9,7 +9,7 @@
  * #3982). This table exists so other models, multilingual ones especially,
  * can be evaluated against it by adding an entry rather than editing the
  * embedder and the schema separately. A model's vector length is not a free
- * choice: the server's Postgres column is declared vector(dims), so the
+ * choice: the server's Postgres column is declared halfvec(dims), so the
  * schema reads it from here (see applyVectorSchema).
  *
  * CLAUDE_MEM_EMBEDDING_MODEL names the entry in use; the other three entries
@@ -21,7 +21,7 @@ export interface EmbeddingModel {
   dtype: 'fp32';
   /** mean: the average over real tokens; cls: the first token's vector. */
   pooling: 'mean' | 'cls';
-  /** Vector length; sizes the server's vector(n) column. */
+  /** Vector length; sizes the server's halfvec(n) column. */
   dims: number;
   /**
    * Tokens per input, [CLS] and [SEP] included: the length the model was

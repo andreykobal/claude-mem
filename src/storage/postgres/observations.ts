@@ -639,7 +639,7 @@ export class PostgresObservationRepository {
       WITH ${keyword},
       nearest AS (${narrowed
         ? `
-        SELECT e.observation_id, e.embedding <=> $10::vector AS distance
+        SELECT e.observation_id, e.embedding <=> $10::halfvec AS distance
         FROM observation_embeddings e
         INNER JOIN observations ON observations.id = e.observation_id
         LEFT JOIN server_sessions
@@ -647,12 +647,12 @@ export class PostgresObservationRepository {
           AND server_sessions.project_id = observations.project_id
           AND server_sessions.team_id = observations.team_id
         WHERE e.project_id = ANY($1::text[]) AND e.team_id = $2 AND e.model = $12 AND ${scopeSql}
-        ORDER BY e.embedding <=> $10::vector`
+        ORDER BY e.embedding <=> $10::halfvec`
         : `
-        SELECT observation_id, embedding <=> $10::vector AS distance
+        SELECT observation_id, embedding <=> $10::halfvec AS distance
         FROM observation_embeddings
         WHERE project_id = ANY($1::text[]) AND team_id = $2 AND model = $12
-        ORDER BY embedding <=> $10::vector`}
+        ORDER BY embedding <=> $10::halfvec`}
         LIMIT $11
       ),
       semantic AS (
