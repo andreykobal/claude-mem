@@ -4,6 +4,7 @@ import { projectReadKeys, projectScopeSql } from '../project-read-keys.js';
 import type { ObservationRecord } from '../../../types/database.js';
 import { DEFAULT_PLATFORM_SOURCE, normalizePlatformSource } from '../../../shared/platform-source.js';
 import { logger } from '../../../utils/logger.js';
+import { expandFilePathCandidates } from '../../../shared/file-path-candidates.js';
 
 export function getObservationsByFilePath(
   db: Database,
@@ -15,29 +16,8 @@ export function getObservationsByFilePath(
     ? Math.min(rawLimit as number, 100)
     : 15;
 
-  // #2691 — PreToolUse:Read and PostToolUse can disagree on the stored path
-  // form (absolute vs project-root-relative vs cwd-relative). Accept multiple
-  // candidate path forms and match observations whose files_read/files_modified
-  // contain ANY of them, so context injection keyed on path is consistent
-  // across the two events. De-duplicate to keep the IN() clause minimal.
-  // A Windows tool input is stored as written (`C:\proj\src\a.ts`) while
-  // callers send forward-slashed forms, so each candidate also matches its
-  // backslashed spelling, as folder lookups already do.
-  const paths = (Array.isArray(filePath) ? filePath : [filePath])
-    .filter(p => typeof p === 'string' && p.length > 0);
-  // An absolute POSIX filename also determines how its relative candidates read.
-  const literalBackslashes = paths.some(p => p.startsWith('/') && !p.startsWith('//') && p.includes('\\'));
-  const candidatePaths = Array.from(
-    new Set(paths
-      .flatMap(p => {
-        const forward = (literalBackslashes ? p : p.replaceAll('\\', '/')).replace(/^(\.\/)+/, '');
-        const forms = [p, forward];
-        // Read resolves away ./, but captured tool evidence keeps it verbatim.
-        // Only relative paths have this equivalent current-directory spelling.
-        if (forward && !/^(\/|[A-Za-z]:|~\/)/.test(forward)) forms.push(`./${forward}`);
-        return literalBackslashes ? forms : forms.flatMap(form => [form, form.replaceAll('/', '\\')]);
-      }))
-  );
+  // #2691: every stored spelling of these paths (shared/file-path-candidates.ts).
+  const candidatePaths = expandFilePathCandidates(filePath);
   if (candidatePaths.length === 0) {
     logger.debug('DB', 'Skipping observation file lookup with no candidate paths');
     return [];

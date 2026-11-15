@@ -13,6 +13,11 @@ import { normalizePlatformSource } from '../../shared/platform-source.js';
 import { projectsQueryString } from '../../shared/project-list.js';
 import { spoolHookEvent } from '../../cli/spool-hook-event.js';
 import { ingestObservation, ingestSummarize } from '../worker/http/shared.js';
+import { observationHandler } from '../../cli/handlers/observation.js';
+import { summarizeWatchedSessionViaServer } from '../../cli/handlers/summarize.js';
+import { resolveRuntimeContext, selectRuntime, type ServerRuntimeContext } from '../hooks/runtime-selector.js';
+import { loadFromFileOnce } from '../../shared/hook-settings.js';
+import { isWorkStateEnabled } from '../../shared/work-state-setting.js';
 
 const AGENT_ID_IN_PATH =
   /agent-transcripts[/\\]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[/\\]|$)/i;
@@ -537,6 +542,26 @@ export class TranscriptEventProcessor {
       agentId: resolveWatchAgentId(watch),
       eventOccurredAtEpochMs,
     };
+    // Server runtime: the watched event goes to the server through the same
+    // capture path a PostToolUse hook takes (skip-tools, privacy, one bounded
+    // handoff); a failure skips it. Never the local worker.
+    if (this.observationTransport === 'spool' && selectRuntime() === 'server') {
+      try {
+        await observationHandler.execute({
+          sessionId: payload.contentSessionId,
+          cwd: payload.cwd ?? '',
+          platform: payload.platformSource,
+          toolName: payload.toolName,
+          toolInput: payload.toolInput,
+          toolResponse: payload.toolResponse,
+          ...(payload.toolUseId ? { toolUseId: payload.toolUseId } : {}),
+          ...(payload.agentId ? { agentId: payload.agentId } : {}),
+        });
+      } catch (error) {
+        logger.warn('TRANSCRIPT', 'Skipping transcript event after failed server handoff', { sessionId: session.sessionId }, error instanceof Error ? error : undefined);
+      }
+      return;
+    }
     if (this.observationTransport === 'spool') {
       try {
         spoolHookEvent('observation', payload);
@@ -613,6 +638,15 @@ export class TranscriptEventProcessor {
   }
 
   private async queueSummary(session: SessionState): Promise<void> {
+    if (this.observationTransport === 'spool' && selectRuntime() === 'server') {
+      await summarizeWatchedSessionViaServer({
+        sessionId: session.sessionId,
+        cwd: session.cwd,
+        lastAssistantMessage: session.lastAssistantMessage ?? '',
+        platformSource: session.platformSource,
+      });
+      return;
+    }
     if (this.observationTransport === 'spool') {
       try {
         spoolHookEvent('summarize', {
@@ -653,11 +687,20 @@ export class TranscriptEventProcessor {
     if (watch.context.mode !== 'agents') return;
     if (shouldSuppressNativeCodexAgentsContext(watch)) return;
 
-    const workerReady = await ensureWorkerRunning();
-    if (!workerReady) return;
-
     const cwd = session.cwd ?? watch.workspace;
     if (!cwd) return;
+
+    // Server runtime: AGENTS.md gets the server's block; no local worker is
+    // started or asked (it would capture into a store no session reads).
+    const runtime = resolveRuntimeContext(cwd);
+    let serverContent: string | null = null;
+    if (runtime.runtime === 'server') {
+      serverContent = await renderServerAgentsContext(runtime, cwd, session.platformSource);
+      if (!serverContent) return;
+    } else {
+      const workerReady = await ensureWorkerRunning();
+      if (!workerReady) return;
+    }
 
     const context = getProjectContext(cwd);
     const projectsQuery = projectsQueryString(context.allProjects);
@@ -674,6 +717,12 @@ export class TranscriptEventProcessor {
         resolved: resolvedAgentsPath,
         allowedRoots
       });
+      return;
+    }
+
+    if (serverContent !== null) {
+      writeAgentsMd(agentsPath, serverContent);
+      logger.debug('TRANSCRIPT', 'Updated AGENTS.md context from the server', { agentsPath, watch: watch.name });
       return;
     }
 
@@ -694,5 +743,37 @@ export class TranscriptEventProcessor {
 
     writeAgentsMd(agentsPath, content);
     logger.debug('TRANSCRIPT', 'Updated AGENTS.md context', { agentsPath, watch: watch.name });
+  }
+}
+
+/**
+ * The AGENTS.md block in server runtime: the server-runtime SessionStart
+ * render (recent rows plus the open work-state lists), or null when there is
+ * nothing to write or the server cannot answer.
+ */
+async function renderServerAgentsContext(runtime: ServerRuntimeContext, cwd: string, platformSource: string): Promise<string | null> {
+  try {
+    const settings = loadFromFileOnce();
+    const [{ generateServerSessionStartContext }, { ModeManager }] = await Promise.all([
+      import('../context/ContextBuilder.js'),
+      import('../domain/ModeManager.js'),
+    ]);
+    ModeManager.getInstance().loadMode(settings.CLAUDE_MEM_MODE);
+    const { model } = await generateServerSessionStartContext(runtime, {
+      cwd,
+      projects: getProjectContext(cwd).allProjects,
+      platformSource,
+    }, {
+      withTerminalRender: false,
+      timeoutMs: 10_000,
+      workState: isWorkStateEnabled(process.env.CLAUDE_MEM_WORK_STATE_ENABLED ?? settings.CLAUDE_MEM_WORK_STATE_ENABLED),
+    });
+    const content = model.trim();
+    return content || null;
+  } catch (error) {
+    logger.warn('TRANSCRIPT', 'Failed to read AGENTS.md context from the server', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
   }
 }

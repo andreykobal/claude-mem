@@ -19,7 +19,7 @@ import { resolveWithinWorkspace } from '../../services/smart-file-read/workspace
 import { claimFileContextInjection } from './file-context-dedupe.js';
 import { memorySearchHandler } from './memory-search.js';
 import { isQwenCodeHookEvent } from './session-init.js';
-import { resolveRuntimeContext } from '../../services/hooks/runtime-selector.js';
+import { resolveRuntimeContext, type ServerRuntimeContext } from '../../services/hooks/runtime-selector.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
 import {
   findLineAnchor,
@@ -74,7 +74,8 @@ const TYPE_ICONS: Record<string, string> = {
 
 
 interface ObservationRow {
-  id: number;
+  /** A number from the local store, a UUID from the server. */
+  id: number | string;
   memory_session_id: string;
   title: string | null;
   type: string;
@@ -142,7 +143,7 @@ interface FileObservationHistory {
    * fetched observation with anchors on this file, where they are in it now.
    * Absent when the setting is off or no observation has an anchor here.
    */
-  lineAnchorStatus?: Map<number, LineAnchorStatus>;
+  lineAnchorStatus?: Map<number | string, LineAnchorStatus>;
   /**
    * The file changed after its newest observation, and line anchors listed the
    * observations with anchors on it (#1719 hides the rest). Context only: the
@@ -174,7 +175,7 @@ function escapePathForHint(filePath: string): string {
  */
 function formatObservationTimeline(
   observationsOldestFirst: ObservationRow[],
-  lineAnchorStatus?: Map<number, LineAnchorStatus>,
+  lineAnchorStatus?: Map<number | string, LineAnchorStatus>,
 ): string[] {
   const lines: string[] = [];
   let currentDay: string | null = null;
@@ -398,16 +399,14 @@ export const fileContextHandler: EventHandler = {
       return { continue: true, suppressOutput: true };
     }
 
-    // #4558 — the by-file lookup is a worker-only route, and calling it lazy-spawns
-    // a local worker (and creates its DB). In server runtime there is no local
-    // worker by design, so skip file context like summarize/session-end do.
-    if (resolveRuntimeContext().runtime === 'server') {
-      logger.debug('HOOK', 'Server runtime: skipping worker file-context lookup', { cwd: input.cwd });
-      return { continue: true, suppressOutput: true };
-    }
+    // #4558 — in server runtime the history comes from the server; the worker
+    // route is never called, since calling it would lazy-spawn a local worker
+    // (and create its DB). Incomplete server settings resolve to the worker.
+    const runtime = resolveRuntimeContext(input.cwd);
+    const serverRuntime = runtime.runtime === 'server' ? runtime : null;
 
     const lookupResults = await Promise.allSettled(
-      candidatePaths.map(candidatePath => lookupFileObservationHistory(input, candidatePath))
+      candidatePaths.map(candidatePath => lookupFileObservationHistory(input, candidatePath, serverRuntime))
     );
     const histories: FileObservationHistory[] = [];
 
@@ -508,9 +507,83 @@ export function fileHistoryQueryPaths(
   return Array.from(new Set([absoluteForward, relativePath, homeRelative].filter(Boolean)));
 }
 
+/** The worker's by-file read, or null when the worker cannot answer. */
+async function fetchWorkerFileHistory(
+  candidateQueryPaths: string[],
+  projects: string[],
+  platformSource: string | undefined,
+  filePath: string,
+): Promise<ObservationRow[] | null> {
+  const queryParams = new URLSearchParams();
+  for (const candidate of candidateQueryPaths) queryParams.append('path', candidate);
+  for (const value of projectsQueryValues(projects)) queryParams.append('projects', value);
+  queryParams.set('limit', String(FETCH_LOOKAHEAD_LIMIT));
+  if (platformSource) queryParams.set('platformSource', platformSource);
+  const result = await executeWithWorkerFallback<{ observations: ObservationRow[]; count: number }>(
+    `/api/observations/by-file?${queryParams.toString()}`,
+    'GET',
+    undefined,
+    { timeoutMs: FILE_CONTEXT_WORKER_BUDGET_MS },
+  );
+  if (isWorkerFallback(result)) return null;
+  if (!result || !Array.isArray((result as any).observations)) {
+    logger.warn('HOOK', 'File context query returned malformed body, skipping', { filePath });
+    return null;
+  }
+  return result.observations;
+}
+
+/**
+ * The server's by-file read in server runtime, in the worker's row shape, or
+ * null when the server cannot answer within the hook budget (the Read goes on
+ * without a timeline; nothing falls back to a local worker).
+ */
+async function fetchServerFileHistory(
+  runtime: ServerRuntimeContext,
+  candidateQueryPaths: string[],
+  folderProjects: string[],
+  platformSource: string | undefined,
+): Promise<ObservationRow[] | null> {
+  try {
+    const response = await runtime.client.observationsByFile({
+      projectId: runtime.projectId,
+      paths: candidateQueryPaths,
+      limit: FETCH_LOOKAHEAD_LIMIT,
+      ...(platformSource ? { platformSource } : {}),
+      folderProjects,
+    }, { timeoutMs: FILE_CONTEXT_WORKER_BUDGET_MS });
+    return (response?.observations ?? []).map(serverRowToObservationRow);
+  } catch (error) {
+    logger.debug('HOOK', 'Server file-context lookup failed, skipping', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+function serverRowToObservationRow(row: { id: string; content: string; [key: string]: unknown }): ObservationRow {
+  const metadata = (row.metadata && typeof row.metadata === 'object' ? row.metadata : {}) as Record<string, unknown>;
+  const list = (value: unknown) => Array.isArray(value) ? JSON.stringify(value) : null;
+  const title = typeof metadata.title === 'string' && metadata.title.trim()
+    ? metadata.title
+    : row.content.split('\n')[0]?.slice(0, 160) ?? null;
+  return {
+    id: row.id,
+    // One row per session survives dedupe; a row with no session stands alone.
+    memory_session_id: typeof row.serverSessionId === 'string' ? row.serverSessionId : row.id,
+    title,
+    type: typeof row.kind === 'string' ? row.kind : 'discovery',
+    created_at_epoch: typeof row.createdAtEpoch === 'number' ? row.createdAtEpoch : 0,
+    files_read: list(metadata.files_read),
+    files_modified: list(metadata.files_modified),
+    metadata: JSON.stringify(metadata),
+  };
+}
+
 async function lookupFileObservationHistory(
   input: NormalizedHookInput,
   filePath: string,
+  serverRuntime: ServerRuntimeContext | null = null,
 ): Promise<FileObservationHistory | null> {
   let fileMtimeMs = 0;
   let fileStatVerified = false;
@@ -560,36 +633,16 @@ async function lookupFileObservationHistory(
   const candidateQueryPaths = Array.from(new Set([
     ...fileHistoryQueryPaths(absolutePath, relativePath), ...projectRelativePaths,
   ]));
-  const queryParams = new URLSearchParams();
-  for (const candidate of candidateQueryPaths) {
-    queryParams.append('path', candidate);
-  }
-  if (context.allProjects.length > 0) {
-    for (const value of projectsQueryValues(context.allProjects)) {
-      queryParams.append('projects', value);
-    }
-  }
-  queryParams.set('limit', String(FETCH_LOOKAHEAD_LIMIT));
   // Keep the lookup on the calling harness's rows; the opt-out is the same
   // cross-harness hand-off switch the other context paths honour.
-  if (input.platform && loadFromFileOnce().CLAUDE_MEM_SESSION_START_INCLUDE_ALL_SOURCES !== 'true') {
-    queryParams.set('platformSource', normalizePlatformSource(input.platform));
-  }
-
-  const result = await executeWithWorkerFallback<{ observations: ObservationRow[]; count: number }>(
-    `/api/observations/by-file?${queryParams.toString()}`,
-    'GET',
-    undefined,
-    { timeoutMs: FILE_CONTEXT_WORKER_BUDGET_MS },
-  );
-  if (isWorkerFallback(result)) {
-    return null;
-  }
-  if (!result || !Array.isArray((result as any).observations)) {
-    logger.warn('HOOK', 'File context query returned malformed body, skipping', { filePath });
-    return null;
-  }
-  const data = result;
+  const platformSource = input.platform && loadFromFileOnce().CLAUDE_MEM_SESSION_START_INCLUDE_ALL_SOURCES !== 'true'
+    ? normalizePlatformSource(input.platform)
+    : undefined;
+  const observations = serverRuntime
+    ? await fetchServerFileHistory(serverRuntime, candidateQueryPaths, context.allProjects, platformSource)
+    : await fetchWorkerFileHistory(candidateQueryPaths, context.allProjects, platformSource, filePath);
+  if (!observations) return null;
+  const data = { observations };
 
   if (!data.observations || data.observations.length === 0) {
     return null;
@@ -652,8 +705,8 @@ function lookUpLineAnchors(
   candidateQueryPaths: string[],
   absolutePath: string,
   fileSizeBytes: number,
-): Map<number, LineAnchorStatus> {
-  const statuses = new Map<number, LineAnchorStatus>();
+): Map<number | string, LineAnchorStatus> {
+  const statuses = new Map<number | string, LineAnchorStatus>();
   const spellings = new Set(candidateQueryPaths.map(normalizeLineAnchorPath));
   const anchored = observations
     .map(obs => ({

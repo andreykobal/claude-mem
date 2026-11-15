@@ -12,6 +12,7 @@ import { proTrialLine } from '../../shared/pro-promo.js';
 import { shouldTrackProject } from '../../shared/should-track-project.js';
 import { projectsQueryString } from '../../shared/project-list.js';
 import { getProjectContext } from '../../utils/project-name.js';
+import { selectRuntime } from '../../services/hooks/runtime-selector.js';
 
 export const userMessageHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
@@ -20,6 +21,11 @@ export const userMessageHandler: EventHandler = {
     // closed after the SessionStart path honored CLAUDE_MEM_EXCLUDED_PROJECTS,
     // but UserPromptSubmit still fetched and bannered context for excluded dirs.
     if (!shouldTrackProject(cwd)) {
+      return { exitCode: HOOK_EXIT_CODES.SUCCESS };
+    }
+    // No host wires this hook; its banner is the worker's context. In server
+    // runtime there is no local worker to ask, so it shows nothing.
+    if (selectRuntime() === 'server') {
       return { exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 

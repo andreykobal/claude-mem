@@ -478,6 +478,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_observations_generation_key_scope
 CREATE UNIQUE INDEX IF NOT EXISTS idx_observation_jobs_source_scope
   ON observation_generation_jobs(team_id, project_id, source_type, source_id, job_type);
 CREATE INDEX IF NOT EXISTS idx_projects_team ON projects(team_id, id);
+CREATE INDEX IF NOT EXISTS idx_projects_team_lower_name ON projects(team_id, lower(name));
+-- The by-file read (findByFilePaths) matches stored path spellings in these arrays.
+CREATE INDEX IF NOT EXISTS idx_observations_files_read ON observations USING GIN ((metadata->'files_read'));
+CREATE INDEX IF NOT EXISTS idx_observations_files_modified ON observations USING GIN ((metadata->'files_modified'));
 CREATE INDEX IF NOT EXISTS idx_agent_events_team_project ON agent_events(team_id, project_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_observations_project_session ON observations(project_id, server_session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_observations_team_project ON observations(team_id, project_id, created_at);

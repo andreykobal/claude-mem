@@ -253,16 +253,21 @@ export interface CaptureDeliverablesOptions {
  * when the turn is private, when the worker is on another host, or when the
  * turn made nothing for a person.
  */
-export function captureDeliverables(input: NormalizedHookInput, options: CaptureDeliverablesOptions = {}): { copied: number; reused: number; failed: number } | null {
+export function captureDeliverables(
+  input: NormalizedHookInput,
+  options: CaptureDeliverablesOptions = {},
+): { copied: number; reused: number; failed: number; serverPayload?: SpooledDeliverablesPayload } | null {
   const { sessionId, cwd, transcriptPath } = input;
   if (!sessionId || !cwd || !(options.subagentTranscriptPath ?? transcriptPath)) return null;
   const settings = loadFromFileOnce();
   if (!isDeliverablesCaptureEnabled(process.env.CLAUDE_MEM_DELIVERABLES_ENABLED ?? settings.CLAUDE_MEM_DELIVERABLES_ENABLED)) return null;
-  // Server runtime has no local worker to record the copies; the bucket is a worker-runtime feature.
-  if (resolveRuntimeContext().runtime === 'server') return null;
+  // Server runtime: the copies still go into this machine's bucket (a scratch
+  // folder can vanish), and the record goes to the server as metadata through
+  // the caller (serverPayload) instead of the worker spool.
+  const serverRuntime = resolveRuntimeContext(cwd).runtime === 'server';
   // A worker on another host could not open a copy made on this disk, and My Work would hide its record: the bucket is for a worker that shares the disk.
   const workerHost = getWorkerHost();
-  if (usesRemoteHookSpool(workerHost, 'auto', settings.CLAUDE_MEM_WORKER_URL)) {
+  if (!serverRuntime && usesRemoteHookSpool(workerHost, 'auto', settings.CLAUDE_MEM_WORKER_URL)) {
     logger.debug('HOOK', 'Deliverables are not captured for a worker on another host', { workerHost });
     return null;
   }
@@ -333,7 +338,8 @@ export function captureDeliverables(input: NormalizedHookInput, options: Capture
     files,
     ...(errors.length ? { errors: boundedErrors(errors) } : {}),
   };
-  spoolHookEvent('deliverables', payload);
   logger.info('HOOK', 'Deliverables copied into the project bucket', { project, files: files.length, reused, failed: errors.length });
+  if (serverRuntime) return { copied: files.length - reused, reused, failed: errors.length, serverPayload: payload };
+  spoolHookEvent('deliverables', payload);
   return { copied: files.length - reused, reused, failed: errors.length };
 }

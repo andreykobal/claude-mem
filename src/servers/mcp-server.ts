@@ -34,6 +34,7 @@ import { parseFile, formatFoldedView, unfoldSymbol, formatAvailableSymbols } fro
 import { treeSitterCliUnavailableMessage } from '../services/smart-file-read/tree-sitter-bin-path.js';
 import { resolveWithinWorkspace } from '../services/smart-file-read/workspace-path.js';
 import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { marketplaceDirectoryCandidates } from '../shared/known-marketplace-location.js';
 import { dirname, resolve } from 'node:path';
@@ -147,6 +148,12 @@ function workerResultPurpose(endpoint: string, writes: boolean): McpTextPurpose 
 }
 
 async function callWorker(endpoint: string, opts: WorkerCallOptions = {}): Promise<WorkerToolResult> {
+  // Server runtime has no local worker: a tool without a server branch says so
+  // instead of reaching a worker that may be stale (its store is not the
+  // server's) or absent. See shared/server-runtime-support.ts.
+  if (selectRuntime() === 'server') {
+    return mcpTextResult(`This tool is not available in server runtime yet (it needs the local worker, ${endpoint.split('?')[0]}); no local request was made.`, true);
+  }
   logger.debug('SYSTEM', '→ Worker API', undefined, { endpoint });
 
   try {
@@ -530,6 +537,61 @@ function workStateServerError(error: unknown): { content: Array<{ type: 'text'; 
   return formatToolError(error);
 }
 
+/**
+ * save_memory in server runtime: the note goes to the server project of
+ * `project` (default: this checkout), shaped like the worker's manual memory
+ * (save-memory.ts) so search, SessionStart and get_observations read it alike.
+ * A sourceFingerprint makes a repeat save return the first note, as the worker
+ * deduplicates on it.
+ */
+async function serverSaveMemory(args: { text?: unknown; title?: unknown; project?: unknown; metadata?: unknown }) {
+  const text = typeof args.text === 'string' ? args.text.trim() : '';
+  if (!text) return mcpTextResult('Not saved: "text" is required.', true);
+  const cwd = getRequestCwd();
+  if (isProjectExcluded(cwd, loadFromFileOnce().CLAUDE_MEM_EXCLUDED_PROJECTS)) {
+    return mcpTextResult('Not saved: this project is excluded from claude-mem (CLAUDE_MEM_EXCLUDED_PROJECTS).');
+  }
+  const project = typeof args.project === 'string' && args.project.trim() ? args.project.trim() : currentCheckout().primary;
+  const runtime = serverContextForProject(project);
+  if (!runtime) return mcpTextResult(serverConfigIncompleteText('save_memory'), true);
+  const title = typeof args.title === 'string' && args.title.trim()
+    ? args.title.trim()
+    : text.length > 60 ? `${text.slice(0, 60)}...` : text;
+  const extra = args.metadata && typeof args.metadata === 'object' && !Array.isArray(args.metadata)
+    ? args.metadata as Record<string, unknown>
+    : {};
+  const fingerprint = typeof extra.sourceFingerprint === 'string' && extra.sourceFingerprint ? extra.sourceFingerprint : null;
+  const platformSource = typeof extra.platformSource === 'string' ? extra.platformSource : null;
+  try {
+    const response = await runtime.client.addObservation({
+      projectId: runtime.projectId,
+      kind: 'discovery',
+      content: `${title}\nManual memory\n${text}`,
+      metadata: {
+        ...extra,
+        title,
+        subtitle: 'Manual memory',
+        narrative: text,
+        facts: [],
+        concepts: [],
+        files_read: [],
+        files_modified: [],
+        project,
+      },
+      ...(fingerprint
+        ? { generationKey: `memory:${createHash('sha256').update(`${project}\0${platformSource ?? ''}\0${fingerprint}`).digest('hex')}` }
+        : {}),
+    });
+    const memory = (response as { memory?: { id?: string }; existing?: boolean }).memory;
+    const existing = (response as { existing?: boolean }).existing === true;
+    return mcpTextResult(existing
+      ? `Already saved as #${memory?.id} in ${project}.`
+      : `Saved memory #${memory?.id} "${title}" in ${project}.`);
+  } catch (error) {
+    return formatToolError(error);
+  }
+}
+
 /** work_state_write in server runtime: the row goes to the server project this checkout's hooks write to. */
 async function serverWorkStateWrite(args: { list?: unknown; fields?: unknown }) {
   const cwd = getRequestCwd();
@@ -668,7 +730,7 @@ const tools: McpToolDefinition[] = [
   },
   {
     name: 'save_memory',
-    description: 'Save an explicit durable note, decision, correction or handoff into worker-mode claude-mem. Use this for your own note taking after searching memory for duplicates. Include project when the note belongs to a specific project. Server runtime uses observation_add to write to the selected server.',
+    description: 'Save an explicit durable note, decision, correction or handoff into claude-mem (the local store, or the server in server runtime). Use this for your own note taking after searching memory for duplicates. Include project when the note belongs to a specific project.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -681,7 +743,7 @@ const tools: McpToolDefinition[] = [
       additionalProperties: false,
     },
     handler: async (args: any) => {
-      if (selectRuntime() === 'server') return mcpTextResult('save_memory requires worker runtime. To save a note in the selected server, use observation_add with content and optional projectId.', true);
+      if (selectRuntime() === 'server') return serverSaveMemory(args ?? {});
       return callWorker('/api/memory/save', { body: { ...args, project: args?.project || currentCheckout().primary } });
     },
   },

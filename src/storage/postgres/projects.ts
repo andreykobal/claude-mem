@@ -44,11 +44,16 @@ export class PostgresProjectsRepository {
     return mapProjectRow(row!);
   }
 
-  /** The team's oldest project with this name, if any (names are not unique in the schema). */
+  /**
+   * The team's project with this name, ignoring case as the local store does
+   * (`Witch-Match` and `witch-match` are one project); an exact-case match
+   * wins, then the oldest (names are not unique in the schema).
+   */
   async getByNameForTeam(name: string, teamId: string): Promise<PostgresProject | null> {
     const row = await queryOne<ProjectRow>(
       this.client,
-      'SELECT * FROM projects WHERE team_id = $1 AND name = $2 ORDER BY created_at ASC, id ASC LIMIT 1',
+      `SELECT * FROM projects WHERE team_id = $1 AND lower(name) = lower($2)
+       ORDER BY (name = $2) DESC, created_at ASC, id ASC LIMIT 1`,
       [teamId, name]
     );
     return row ? mapProjectRow(row) : null;
@@ -76,7 +81,7 @@ export async function getOrCreateProjectByName(
   const existing = await new PostgresProjectsRepository(pool).getByNameForTeam(input.name, input.teamId);
   if (existing) return existing;
   return withPostgresTransaction(pool, async client => {
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`project-name:${input.teamId}:${input.name}`]);
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`project-name:${input.teamId}:${input.name.toLowerCase()}`]);
     const repo = new PostgresProjectsRepository(client);
     const raced = await repo.getByNameForTeam(input.name, input.teamId);
     if (raced) return raced;

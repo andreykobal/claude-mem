@@ -257,6 +257,49 @@ export class PostgresObservationRepository {
     return result.rows.map(mapObservationRow);
   }
 
+  /**
+   * Observations that read or modified any of these paths, newest first, in
+   * the caller's scope (the same project, folder and platform filters search()
+   * applies). `paths` are the stored spellings to match
+   * (shared/file-path-candidates.ts); generated observations keep them in
+   * metadata.files_read / files_modified. Summaries carry no file lists.
+   */
+  async findByFilePaths(input: {
+    projectId: string;
+    teamId: string;
+    paths: string[];
+    limit: number;
+    platformSource?: string | null;
+    folderProjects?: string[] | null;
+  }): Promise<PostgresObservation[]> {
+    if (input.paths.length === 0) return [];
+    const result = await this.client.query<ObservationRow>(
+      `SELECT observations.*
+       FROM observations
+       LEFT JOIN server_sessions ON server_sessions.id = observations.server_session_id
+       WHERE ${SEARCH_SCOPE_SQL}
+         AND (
+           (jsonb_typeof(observations.metadata->'files_read') = 'array'
+             AND observations.metadata->'files_read' ?| $3::text[])
+           OR (jsonb_typeof(observations.metadata->'files_modified') = 'array'
+             AND observations.metadata->'files_modified' ?| $3::text[])
+         )
+       ORDER BY observations.created_at DESC, observations.id DESC
+       LIMIT $4`,
+      [
+        input.projectId,
+        input.teamId,
+        input.paths,
+        input.limit,
+        input.platformSource ?? null,
+        input.folderProjects?.length ? input.folderProjects : null,
+        false,
+        false,
+      ],
+    );
+    return result.rows.map(mapObservationRow);
+  }
+
   /** Resolve the anchor inside the caller's scope before reading its neighbors. */
   async timelineAround(input: {
     anchorId: string;

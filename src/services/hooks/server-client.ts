@@ -146,6 +146,8 @@ export interface ServerAddObservationRequest {
   kind?: string;
   content: string;
   metadata?: Record<string, unknown>;
+  /** Idempotency key: a repeat returns the first row (`existing: true`). */
+  generationKey?: string;
 }
 
 export interface ServerAddObservationResponse {
@@ -337,11 +339,13 @@ export class ServerClient {
   // endpoint so search ranking and tenant scoping are owned by one place.
   async searchObservations(
     input: ServerSearchObservationsRequest,
+    options: ServerRequestOptions = {},
   ): Promise<ServerSearchObservationsResponse> {
     return this.request<ServerSearchObservationsResponse>(
       'POST',
       '/v1/search',
       this.buildSearchPayload(input),
+      options,
     );
   }
 
@@ -395,6 +399,19 @@ export class ServerClient {
     }
     if (input.contentSessionId) payload.contentSessionId = input.contentSessionId;
     return this.request<ServerSemanticContextResponse>('POST', '/v1/context/semantic', payload, options);
+  }
+
+  // The file-context hook (PreToolUse Read) in server runtime: observations
+  // that read or modified any spelling of the file's path.
+  async observationsByFile(
+    input: { projectId: string; paths: string[]; limit?: number; platformSource?: string; folderProjects?: string[] },
+    options: ServerRequestOptions = {},
+  ): Promise<ServerSearchObservationsResponse> {
+    const payload: Record<string, unknown> = { projectId: input.projectId, paths: input.paths };
+    if (input.limit !== undefined) payload.limit = input.limit;
+    if (input.platformSource !== undefined) payload.platformSource = input.platformSource;
+    if (input.folderProjects && input.folderProjects.length > 0) payload.folderProjects = input.folderProjects;
+    return this.request<ServerSearchObservationsResponse>('POST', '/v1/observations/by-file', payload, options);
   }
 
   // MCP work_state_write / work_state_read and the SessionStart work-state
@@ -457,6 +474,7 @@ export class ServerClient {
       kind,
       content,
       ...(metadataTitle ? { title: metadataTitle } : {}),
+      ...(input.generationKey ? { generationKey: input.generationKey } : {}),
       ...(input.serverSessionId !== undefined ? { serverSessionId: input.serverSessionId } : {}),
       // Forward the in-session identifiers so the server can resolve the
       // server_sessions row itself; without these the memory lands unlinked.

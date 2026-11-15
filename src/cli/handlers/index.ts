@@ -20,20 +20,10 @@ import { fileEditHandler } from './file-edit.js';
 import { fileContextHandler } from './file-context.js';
 import { postCompactHandler } from './post-compact.js';
 import { subagentContextHandler } from './subagent-context.js';
+import type { HookEventName } from '../../shared/server-runtime-support.js';
 
-export type EventType =
-  | 'context'
-  | 'session-init'
-  | 'session-init-context'
-  | 'observation'
-  | 'summarize'
-  | 'session-end'
-  | 'subagent-stop'
-  | 'user-message'
-  | 'file-edit'
-  | 'file-context'
-  | 'post-compact'
-  | 'subagent-context';
+// One list for the hook events: the server-runtime support table names each.
+export type EventType = HookEventName;
 
 export const sessionInitContextHandler: EventHandler = {
   async execute(input) {

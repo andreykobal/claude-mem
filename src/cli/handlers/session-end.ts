@@ -9,9 +9,12 @@ import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
 import { shouldTrackProject } from '../../shared/should-track-project.js';
 import { resolveRuntimeContext } from '../../services/hooks/runtime-selector.js';
+import { recordServerMetadataEvent } from './server-metadata-event.js';
 
 // Claude Code gives plugin SessionEnd hooks a 1.5-second budget, so this hook
 // only spools the request and pokes the worker; it never waits on the worker.
+// In server runtime it makes one request bounded well inside that budget.
+const SESSION_END_SERVER_TIMEOUT_MS = 1_000;
 
 export const sessionEndHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
@@ -31,9 +34,14 @@ export const sessionEndHandler: EventHandler = {
     const platformSource = normalizePlatformSource(input.platform);
     const runtime = resolveRuntimeContext(input.cwd);
     if (runtime.runtime === 'server') {
-      logger.debug('HOOK', 'session-end: Server runtime handling is not implemented, skipping', {
+      // Recorded only. Not /v1/sessions/:id/end: that starts the summary
+      // generation, which Stop already asked for (or deliberately skipped).
+      await recordServerMetadataEvent(runtime, {
         sessionId,
-      });
+        platformSource,
+        eventType: 'session_end',
+        payload: { ...(input.cwd ? { cwd: input.cwd } : {}) },
+      }, SESSION_END_SERVER_TIMEOUT_MS);
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 

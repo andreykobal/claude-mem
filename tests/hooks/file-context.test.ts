@@ -686,11 +686,41 @@ describe('fileContextHandler — #4558 (server runtime)', () => {
     CLAUDE_MEM_SERVER_PROJECT_ID: 'proj-1',
   };
 
-  it('never calls the worker in server runtime, so no local worker is lazy-spawned', async () => {
+  it('reads the file history from the server in server runtime, never the worker', async () => {
     runtimeSettings = serverSettings;
-    fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
-      makeObservationsResponse([{ id: 1, created_at_epoch: Date.now() + 60_000 }])
-    );
+    const requests: Array<{ url: string; body: any }> = [];
+    fetchSpy = spyOn(globalThis, 'fetch').mockImplementation((async (url: string, init: RequestInit = {}) => {
+      requests.push({ url: String(url), body: JSON.parse(String(init.body ?? '{}')) });
+      return new Response(JSON.stringify({ observations: [{
+        id: '7f3c2a10-0000-4000-8000-000000000001',
+        projectId: 'proj-1',
+        serverSessionId: 'srv-session-1',
+        kind: 'bugfix',
+        content: 'Fixed the parser',
+        metadata: { title: 'Fixed the parser in test.md', files_modified: ['test.md'] },
+        createdAtEpoch: Date.now() + 60_000,
+      }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch);
+
+    const result = await fileContextHandler.execute({
+      sessionId: 'sess',
+      cwd: tmpDir,
+      toolName: 'Read',
+      toolInput: { file_path: testFile },
+    });
+
+    expect(workerFallbackCalls).toHaveLength(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.url).toBe('https://mem.example.test/v1/observations/by-file');
+    expect(requests[0]!.body.projectId).toBe('proj-1');
+    expect(requests[0]!.body.paths).toContain(testFile.split('\\').join('/'));
+    expect(result.hookSpecificOutput?.additionalContext).toContain('Fixed the parser in test.md');
+    expect(result.hookSpecificOutput?.additionalContext).toContain('7f3c2a10-0000-4000-8000-000000000001');
+  });
+
+  it('lets the Read go on without a timeline when the server cannot answer', async () => {
+    runtimeSettings = serverSettings;
+    fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(new Response('down', { status: 503 }));
 
     const result = await fileContextHandler.execute({
       sessionId: 'sess',
@@ -701,7 +731,6 @@ describe('fileContextHandler — #4558 (server runtime)', () => {
 
     expect(result).toEqual({ continue: true, suppressOutput: true });
     expect(workerFallbackCalls).toHaveLength(0);
-    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('still queries the worker when server runtime is incomplete and falls back to worker', async () => {

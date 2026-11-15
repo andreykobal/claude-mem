@@ -14,9 +14,10 @@ function fakePool(seed: Row[] = []) {
   let nextId = 1;
   const query = async (sql: string, params: unknown[] = []) => {
     if (/^\s*(BEGIN|COMMIT|ROLLBACK)/i.test(sql) || sql.includes('pg_advisory_xact_lock')) return { rows: [] };
-    if (sql.includes('SELECT * FROM projects WHERE team_id = $1 AND name = $2')) {
+    if (sql.includes('SELECT * FROM projects WHERE team_id = $1 AND lower(name) = lower($2)')) {
       const [teamId, name] = params as [string, string];
-      return { rows: rows.filter(r => r.team_id === teamId && r.name === name).slice(0, 1) };
+      const matches = rows.filter(r => r.team_id === teamId && r.name.toLowerCase() === name.toLowerCase());
+      return { rows: [...matches.filter(r => r.name === name), ...matches.filter(r => r.name !== name)].slice(0, 1) };
     }
     if (sql.includes('INSERT INTO projects')) {
       const [id, teamId, name, metadata] = params as [string, string, string, string];
@@ -72,6 +73,17 @@ describe('projectNameResolver', () => {
     await run(handler, second);
     expect(rows).toHaveLength(1);
     expect(first.body.projectId).toBe(rows[0]!.id);
+    expect(second.body.projectId).toBe(rows[0]!.id);
+  });
+
+  it('treats names differing only in case as one project, as the local store does', async () => {
+    const { pool, rows } = fakePool();
+    const handler = projectNameResolver(pool, { create: true });
+    const first = { body: { projectId: 'name:Witch-Match' }, authContext: auth() };
+    await run(handler, first);
+    const second = { body: { projectId: 'name:witch-match' }, authContext: auth() };
+    await run(handler, second);
+    expect(rows).toHaveLength(1);
     expect(second.body.projectId).toBe(rows[0]!.id);
   });
 

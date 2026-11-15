@@ -226,9 +226,10 @@ describe('built local MCP Dumb search stdio integration', () => {
       const unavailable = await client.callTool({ name: 'dumb_search', arguments: { query: 'decision' } }) as CallToolResult;
       expect(unavailable.isError).toBe(true);
       expect(modelText(unavailable)).toContain('hosted claude-mem MCP');
+      // save_memory writes to the server in server runtime, never the local worker.
       const note = await client.callTool({ name: 'save_memory', arguments: { text: 'A server-scoped note.' } }) as CallToolResult;
-      expect(note.isError).toBe(true);
-      expect(modelText(note)).toContain('observation_add');
+      expect(note.isError).toBeFalsy();
+      expect(modelText(note)).toContain('Saved memory #memory-fixture');
       expect(localWrites).toBe(0);
       const failure = await client.callTool({ name: 'observation_generation_status', arguments: { jobId: 'bad-fixture' } }) as CallToolResult;
       expect(failure.isError).toBe(true);

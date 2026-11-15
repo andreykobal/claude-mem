@@ -41,6 +41,7 @@ import { serverUsageGuards } from '../../middleware/usage-guards.js';
 import { projectNameResolver } from '../../middleware/project-name-resolver.js';
 import { PostgresUsageRepository } from '../../../storage/postgres/usage.js';
 import { PostgresWorkStateRepository, type PostgresWorkStateEntry } from '../../../storage/postgres/work-state.js';
+import { expandFilePathCandidates } from '../../../shared/file-path-candidates.js';
 import { workStateListSchema, workStateWriteFieldsSchema, workStateWriteRefusal } from '../../../shared/work-state-write.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -980,6 +981,12 @@ export class ServerV1PostgresRoutes implements RouteHandler {
           // explicit null keep meaning different things
           ...this.sessionLookupPlatformScope(req.body),
         });
+        // SessionStart and search scope rows by their folder label
+        // (metadata.project); a note written without one never showed at
+        // SessionStart. It takes the project's own name unless it names one.
+        const folderLabel = typeof body.metadata?.project === 'string' && body.metadata.project.trim()
+          ? null
+          : (await new PostgresProjectsRepository(this.options.pool).getByIdForTeam(body.projectId, teamId))?.name ?? null;
         const createInput = {
           id: randomUUID(),
           generationKey: body.generationKey,
@@ -991,6 +998,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
           // A manual memory can arrive without any session to carry its
           // platform. Keep the supplied source on the row for scoped recall.
           metadata: {
+            ...(folderLabel ? { project: folderLabel } : {}),
             ...body.metadata,
             ...(body.platformSource == null ? {} : {
               platformSource: normalizePlatformSource(body.platformSource),
@@ -1112,6 +1120,44 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         const rows = await new PostgresObservationRepository(this.options.pool).getManyForScope({ ...body, teamId });
         await this.auditWrite(req, 'observation.read', null, body.projectId, {
           mode: 'selected', resultCount: rows.length, observationIds: rows.map(row => row.id),
+        });
+        res.json({ observations: rows.map(serializeObservation) });
+      },
+    ));
+
+    // The file-context hook's history for a file about to be read (server
+    // runtime): observations whose files_read / files_modified hold any of the
+    // given spellings of its path, newest first.
+    app.post('/v1/observations/by-file', readAuth, this.handleCreate(
+      z.object({
+        projectId: z.string().trim().min(1),
+        paths: z.array(z.string().min(1).max(4096)).min(1).max(100),
+        limit: z.number().int().positive().max(100).optional(),
+        platformSource: z.string().min(1).nullable().optional(),
+        folderProjects: z.array(z.string().min(1)).min(1).max(20).optional(),
+      }).strict(),
+      async (req, res, body) => {
+        const teamId = this.requireTeamId(req, res);
+        if (!teamId || !this.ensureProjectAllowed(req, res, body.projectId)) return;
+        const platformSource = normalizePlatformSourceOrNull(body.platformSource);
+        let rows;
+        try {
+          rows = await new PostgresObservationRepository(this.options.pool).findByFilePaths({
+            projectId: body.projectId,
+            teamId,
+            paths: expandFilePathCandidates(body.paths),
+            limit: body.limit ?? 15,
+            platformSource,
+            folderProjects: body.folderProjects ?? null,
+          });
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          logger.warn('SYSTEM', 'observation.by_file failed', { requestId: req.requestId ?? null }, err);
+          this.handleDbError(err, res, 'observation.by_file');
+          return;
+        }
+        await this.auditWrite(req, 'observation.read', null, body.projectId, {
+          mode: 'by-file', resultCount: rows.length, observationIds: rows.map(row => row.id),
         });
         res.json({ observations: rows.map(serializeObservation) });
       },

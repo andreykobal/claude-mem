@@ -21,8 +21,9 @@
 // never drained: a gate row never leaves the box.
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'fs';
-import { dirname } from 'path';
+import { dirname, join } from 'path';
 import { resolveDbPath } from '../../shared/paths.js';
+import { selectRuntime } from '../../services/hooks/runtime-selector.js';
 import { applySqliteConnectionPragmas } from '../../services/sqlite/connection.js';
 import { logger } from '../../utils/logger.js';
 
@@ -87,8 +88,18 @@ function closeQuietly(db: Database): void {
 // re-pointed CLAUDE_MEM_DATA_DIR) reopens instead of serving the stale file.
 let cachedGateDb: { path: string; db: Database } | null = null;
 
+/**
+ * Where the claims live. In server runtime the memory store is the server and
+ * claude-mem.db must not appear on this machine (#4558), so the claims get a
+ * small file of their own beside the hook spool.
+ */
+function gateDbPath(): string {
+  const mainDb = resolveDbPath();
+  return selectRuntime() === 'server' ? join(dirname(mainDb), 'state', 'file-context-gate.db') : mainDb;
+}
+
 function openGateDb(): Database | null {
-  const dbPath = resolveDbPath();
+  const dbPath = gateDbPath();
   if (cachedGateDb?.path === dbPath) return cachedGateDb.db;
   if (cachedGateDb) {
     closeQuietly(cachedGateDb.db);

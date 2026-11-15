@@ -54,7 +54,8 @@ describe('MCP runtime-aware tool visibility', () => {
     }
     expect(names.has('search')).toBe(true);
     expect(names.has('observation_search')).toBe(true);
-    expect(names.has('save_memory')).toBe(false);
+    // save_memory writes to the server in server runtime (/v1/memories).
+    expect(names.has('save_memory')).toBe(true);
     expect(names.has('get_tool_uses')).toBe(false);
   });
 

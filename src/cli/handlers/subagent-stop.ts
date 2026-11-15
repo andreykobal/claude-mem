@@ -8,8 +8,10 @@ import { normalizePlatformSource } from '../../shared/platform-source.js';
 import { shouldTrackProject } from '../../shared/should-track-project.js';
 import { resolveRuntimeContext } from '../../services/hooks/runtime-selector.js';
 import { captureDeliverables } from '../deliverables-capture.js';
+import { recordServerDeliverables, recordServerMetadataEvent } from './server-metadata-event.js';
 
 const DONE: HookResult = { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+const SUBAGENT_STOP_SERVER_TIMEOUT_MS = 2_000;
 
 /**
  * Claude Code SubagentStop: records that one subagent of this session finished,
@@ -26,7 +28,27 @@ export const subagentStopHandler: EventHandler = {
       return DONE;
     }
     if (!shouldTrackProject(input.cwd ?? '')) return DONE;
-    if (resolveRuntimeContext().runtime === 'server') return DONE;
+    const runtime = resolveRuntimeContext(input.cwd);
+    if (runtime.runtime === 'server') {
+      if (input.agentTranscriptPath) {
+        try {
+          const captured = captureDeliverables(input, { subagentTranscriptPath: input.agentTranscriptPath });
+          if (captured?.serverPayload) await recordServerDeliverables(input, captured.serverPayload);
+        } catch (err) {
+          logger.warn('HOOK', 'Deliverables capture failed for a subagent; its stop is still recorded', {
+            sessionId, agentId, error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      // Recorded on the server, never generated from (metadata).
+      await recordServerMetadataEvent(runtime, {
+        sessionId,
+        platformSource: normalizePlatformSource(input.platform),
+        eventType: 'subagent_stop',
+        payload: { agentId, ...(input.agentType ? { agentType: input.agentType } : {}), stoppedAtEpoch: Date.now() },
+      }, SUBAGENT_STOP_SERVER_TIMEOUT_MS);
+      return DONE;
+    }
 
     spoolHookEvent('subagent_stop', {
       contentSessionId: sessionId,

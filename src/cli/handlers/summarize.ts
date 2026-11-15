@@ -20,6 +20,7 @@ import { isPrivatePrompt } from '../../shared/deliverables-transcript.js';
 import { loadFromFileOnce } from '../../shared/hook-settings.js';
 import { isObserverCaptureEnabled } from '../../shared/observer-capture.js';
 import { captureDeliverables } from '../deliverables-capture.js';
+import { recordServerDeliverables } from './server-metadata-event.js';
 
 // The ingest route accepts at most this many calls per request; one spool
 // entry carries at most the same.
@@ -104,6 +105,36 @@ async function summarizeViaServer(
   return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
 }
 
+/**
+ * A transcript watcher's session end in server runtime (Codex and other
+ * watched hosts): the same server summary request Stop makes, behind the same
+ * gates, as one live handoff. A failure skips the summary; nothing is spooled
+ * or handed to a local worker. Returns whether the server took it.
+ */
+export async function summarizeWatchedSessionViaServer(input: {
+  sessionId: string;
+  cwd: string | undefined;
+  lastAssistantMessage: string;
+  platformSource: string;
+}): Promise<boolean> {
+  if (isSummarizeDisabledByEnv('summarize')) return false;
+  if (!isObserverCaptureEnabled(loadFromFileOnce())) return false;
+  if (!input.lastAssistantMessage.trim()) return false;
+  const runtime = resolveRuntimeContext(input.cwd);
+  if (runtime.runtime !== 'server') return false;
+  try {
+    await summarizeViaServer(runtime, input.sessionId, input.lastAssistantMessage, input.platformSource);
+    return true;
+  } catch (error) {
+    if (isServerClientError(error)) {
+      logServerFallback(error.kind, { status: error.status, message: error.message, route: '/v1/sessions/end' });
+    } else {
+      logger.warn('HOOK', 'Watched session summary failed', { error: error instanceof Error ? error.message : String(error) });
+    }
+    return false;
+  }
+}
+
 export const summarizeHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
     if (input.cwd && !shouldTrackProject(input.cwd)) {
@@ -169,7 +200,8 @@ export const summarizeHandler: EventHandler = {
     // early returns, like advisor capture: a turn with an empty assistant
     // message can still have written a deck. Failure-isolated from the summary.
     try {
-      captureDeliverables(input);
+      const captured = captureDeliverables(input);
+      if (captured?.serverPayload) await recordServerDeliverables(input, captured.serverPayload);
     } catch (err) {
       logger.warn('HOOK', 'Deliverables capture failed; continuing with summary', {
         sessionId,
