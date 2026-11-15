@@ -180,7 +180,7 @@ function selectObservations(
   const ordered = (matching.length > 0 ? matching : scored).slice().sort((a, b) =>
     b.score - a.score
     || b.observation.created_at_epoch - a.observation.created_at_epoch
-    || a.observation.id - b.observation.id);
+    || String(a.observation.id).localeCompare(String(b.observation.id), 'en', { numeric: true }));
 
   const selected: Excerpt[] = [];
   let usedTokens = 0;

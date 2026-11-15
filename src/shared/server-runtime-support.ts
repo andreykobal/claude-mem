@@ -58,12 +58,12 @@ export const MCP_TOOL_SERVER_SUPPORT: Record<McpToolName, ServerSupport> = {
   smart_search: { kind: 'skip', why: 'reads source files on this machine; no memory backend involved' },
   smart_unfold: { kind: 'skip', why: 'reads source files on this machine; no memory backend involved' },
   smart_outline: { kind: 'skip', why: 'reads source files on this machine; no memory backend involved' },
-  build_corpus: { kind: 'gap', why: 'knowledge corpora live in the local worker; answers that it is unavailable' },
-  list_corpora: { kind: 'gap', why: 'knowledge corpora live in the local worker; answers that it is unavailable' },
-  prime_corpus: { kind: 'gap', why: 'knowledge corpora live in the local worker; answers that it is unavailable' },
-  query_corpus: { kind: 'gap', why: 'knowledge corpora live in the local worker; answers that it is unavailable' },
-  rebuild_corpus: { kind: 'gap', why: 'knowledge corpora live in the local worker; answers that it is unavailable' },
-  reprime_corpus: { kind: 'gap', why: 'knowledge corpora live in the local worker; answers that it is unavailable' },
+  build_corpus: native,
+  list_corpora: native,
+  prime_corpus: native,
+  query_corpus: native,
+  rebuild_corpus: native,
+  reprime_corpus: native,
 };
 
 export const HOOK_EVENT_NAMES = [

@@ -227,4 +227,17 @@ describe('server read parity routes', () => {
     expect(deep.json.toolUses.map((u: any) => u.tool_use_id)).toEqual(['toolu_42']);
     expect((await post('/v1/tool-uses/batch', { projectId, ids: [obs.id] }, otherTeamKey)).json.toolUses ?? []).toEqual([]);
   });
+
+  it('selects corpus observations with the worker filters, oldest first, no summaries', async () => {
+    await observe('Decision on caching', { kind: 'decision', at: '2026-01-03T00:00:00Z', metadata: { concepts: ['trade-off'] } });
+    await observe('Bugfix in cache', { kind: 'bugfix', at: '2026-01-01T00:00:00Z', metadata: { files_modified: ['src/cache.ts'] } });
+    await observe('Cache session summary', { kind: 'summary', at: '2026-01-02T00:00:00Z' });
+    const titles = (json: any) => json.observations.map((o: any) => o.content);
+    expect(titles((await post('/v1/observations/select', { projectId })).json)).toEqual(['Bugfix in cache', 'Decision on caching']);
+    expect(titles((await post('/v1/observations/select', { projectId, types: ['decision'] })).json)).toEqual(['Decision on caching']);
+    expect(titles((await post('/v1/observations/select', { projectId, concepts: ['trade-off'] })).json)).toEqual(['Decision on caching']);
+    expect(titles((await post('/v1/observations/select', { projectId, files: ['src/cache.ts'] })).json)).toEqual(['Bugfix in cache']);
+    expect(titles((await post('/v1/observations/select', { projectId, dateEnd: '2026-01-01' })).json)).toEqual(['Bugfix in cache']);
+    expect((await post('/v1/observations/select', { projectId, limit: 501 })).status).toBe(400);
+  });
 });

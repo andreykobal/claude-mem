@@ -1245,6 +1245,72 @@ export class ServerV1PostgresRoutes implements RouteHandler {
       },
     ));
 
+    // A knowledge corpus's observations (build_corpus / rebuild_corpus in
+    // server runtime): the worker's corpus filter, up to 500 rows, oldest
+    // first. Summaries are not corpus material.
+    app.post('/v1/observations/select', readAuth, this.handleCreate(
+      z.object({
+        projectId: z.string().trim().min(1),
+        query: z.string().trim().min(1).max(500).optional(),
+        types: z.array(z.string().min(1)).max(50).optional(),
+        concepts: z.array(z.string().min(1)).max(50).optional(),
+        files: z.array(z.string().min(1).max(4096)).max(100).optional(),
+        dateStart: z.union([z.string().min(1), z.number()]).optional(),
+        dateEnd: z.union([z.string().min(1), z.number()]).optional(),
+        limit: z.number().int().positive().max(500).optional(),
+      }).strict(),
+      async (req, res, body) => {
+        const teamId = this.requireTeamId(req, res);
+        if (!teamId || !this.ensureProjectAllowed(req, res, body.projectId)) return;
+        let dateStartEpoch: number | null;
+        let dateEndEpoch: number | null;
+        try {
+          dateStartEpoch = body.dateStart !== undefined ? resolveDateBound(body.dateStart, 'start') : null;
+          dateEndEpoch = body.dateEnd !== undefined ? resolveDateBound(body.dateEnd, 'end') : null;
+        } catch (error) {
+          res.status(400).json({ error: 'BadRequest', message: error instanceof Error ? error.message : 'invalid date bound' });
+          return;
+        }
+        const limit = body.limit ?? 500;
+        const repo = new PostgresObservationRepository(this.options.pool);
+        let rows;
+        if (body.files?.length) {
+          // A file filter reads the by-file index, then applies the rest here.
+          const types = body.types?.length ? new Set(body.types) : null;
+          const concepts = body.concepts?.length ? new Set(body.concepts) : null;
+          const terms = body.query ? body.query.toLowerCase().split(/\s+/).filter(Boolean) : [];
+          rows = (await repo.findByFilePaths({ projectId: body.projectId, teamId, paths: expandFilePathCandidates(body.files), limit: 500 }))
+            .filter(row => row.kind !== 'summary')
+            .filter(row => !types || types.has(row.kind))
+            .filter(row => {
+              if (!concepts) return true;
+              const list = (row.metadata as { concepts?: unknown }).concepts;
+              return Array.isArray(list) && list.some(concept => typeof concept === 'string' && concepts.has(concept));
+            })
+            .filter(row => (dateStartEpoch === null || row.createdAtEpoch >= dateStartEpoch) && (dateEndEpoch === null || row.createdAtEpoch <= dateEndEpoch))
+            .filter(row => terms.every(term => row.content.toLowerCase().includes(term)))
+            .slice(0, limit);
+        } else {
+          rows = await repo.search({
+            projectId: body.projectId,
+            teamId,
+            query: body.query ?? null,
+            limit,
+            orderBy: body.query ? 'relevance' : 'date_desc',
+            summary: false,
+            observationTypes: body.types?.length ? body.types : null,
+            observationConcepts: body.concepts?.length ? body.concepts : null,
+            dateStartEpoch,
+            dateEndEpoch,
+            queryEmbedding: body.query ? await embedSearchQuery(this.options.pool, body.query) : null,
+          });
+        }
+        rows.sort((a, b) => a.createdAtEpoch - b.createdAtEpoch || a.id.localeCompare(b.id));
+        await this.auditWrite(req, 'observation.read', null, body.projectId, { mode: 'corpus', resultCount: rows.length });
+        res.json({ observations: rows.map(serializeObservation) });
+      },
+    ));
+
     // The team's project names (CLAUDE_MEM_CONTEXT_PROJECTS=all in server
     // runtime). A project-scoped key sees only its own project.
     app.get('/v1/projects', readAuth, this.asyncHandler(async (req, res) => {

@@ -18,7 +18,8 @@ export interface CorpusStats {
 }
 
 export interface CorpusObservation {
-  id: number;
+  /** A number from the local store, a UUID from the server. */
+  id: number | string;
   type: string;
   title: string;
   subtitle: string | null;

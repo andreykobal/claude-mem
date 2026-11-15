@@ -35,15 +35,18 @@ const ARGS: Partial<Record<McpToolName, Record<string, unknown>>> = {
   observation_generation_status: { jobId: 'job-1' },
   build_corpus: { name: 'c' },
   list_corpora: {},
-  prime_corpus: { name: 'c' },
-  query_corpus: { name: 'c', question: 'q' },
   rebuild_corpus: { name: 'c' },
-  reprime_corpus: { name: 'c' },
+  // These run the paid corpus agent; on a corpus that does not exist they
+  // answer before any agent starts, which is all this test may spend.
+  prime_corpus: { name: 'missing-corpus' },
+  query_corpus: { name: 'missing-corpus', question: 'q' },
+  reprime_corpus: { name: 'missing-corpus' },
 };
 
 // Source tools read files on this machine; given a path that does not exist they
 // answer with an error of their own, which is not a memory backend call.
 const LOCAL_SOURCE_TOOLS = new Set<McpToolName>(['smart_search', 'smart_unfold', 'smart_outline']);
+const PAID_CORPUS_TOOLS = new Set<McpToolName>(['prime_corpus', 'query_corpus', 'reprime_corpus']);
 
 describe('server runtime parity over MCP stdio', () => {
   it('advertises only tools in the support table and never reaches a local worker', async () => {
@@ -66,6 +69,7 @@ describe('server runtime parity over MCP stdio', () => {
     app.post('/v1/tool-uses/batch', (_req, res) => res.json({ toolUses: [{ id: 'e-1', tool_name: 'Bash', tool_input: '{"command":"ls"}', tool_response: 'a.ts' }] }));
     app.post('/v1/tool-uses/search', (_req, res) => res.json({ toolUses: [] }));
     app.get('/v1/projects', (_req, res) => res.json({ projects: [{ id: 'p', name: 'repo' }] }));
+    app.post('/v1/observations/select', (_req, res) => res.json({ observations: [observation] }));
     const server = app.listen(0, '127.0.0.1');
     await new Promise<void>(resolve => server.once('listening', resolve));
     const { port } = server.address() as { port: number };
@@ -98,6 +102,10 @@ describe('server runtime parity over MCP stdio', () => {
         const result = await client.callTool({ name, arguments: ARGS[name] ?? {} }) as CallToolResult;
         const text = result.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
         const support = MCP_TOOL_SERVER_SUPPORT[name];
+        if (PAID_CORPUS_TOOLS.has(name)) {
+          if (!/not found/i.test(text)) failures.push(`${name} did not answer not-found: ${text.slice(0, 200)}`);
+          continue;
+        }
         if (support.kind === 'native' && result.isError) failures.push(`${name} (native) failed: ${text.slice(0, 200)}`);
         if (support.kind !== 'native' && !result.isError) failures.push(`${name} (${support.kind}) answered as if available`);
       }

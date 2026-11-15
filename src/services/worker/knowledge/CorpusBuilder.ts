@@ -80,34 +80,11 @@ export class CorpusBuilder {
     logger.debug('WORKER', `Hydrated ${observationRows.length} observation records`);
 
     const observations = observationRows.map(row => this.mapObservationToCorpus(row));
-
-    const stats = this.calculateStats(observations);
-
-    const now = new Date().toISOString();
-    const corpus: CorpusFile = {
-      version: 1,
-      name,
-      description,
-      created_at: now,
-      updated_at: now,
-      filter,
-      stats,
-      system_prompt: '',
-      session_id: null,
-      observations,
-    };
-
-    corpus.system_prompt = this.renderer.generateSystemPrompt(corpus);
-
-    const renderedText = this.renderer.renderCorpus(corpus);
-    corpus.stats.token_estimate = this.renderer.estimateTokens(renderedText);
-
+    const corpus = assembleCorpusFile(name, description, filter, observations, this.renderer);
     if (options.writeFile !== false) {
       this.corpusStore.write(corpus);
     }
-
     logger.debug('WORKER', `Corpus "${name}" built with ${observations.length} observations, ~${corpus.stats.token_estimate} tokens`);
-
     return corpus;
   }
 
@@ -127,31 +104,61 @@ export class CorpusBuilder {
       created_at_epoch: row.created_at_epoch,
     };
   }
+}
 
-  private calculateStats(observations: CorpusObservation[]): CorpusStats {
-    const typeBreakdown: Record<string, number> = Object.create(null);
-    let earliestEpoch = Infinity;
-    let latestEpoch = -Infinity;
+/**
+ * A corpus file from its selected observations: stats, system prompt and token
+ * estimate. Shared by the local builder and the server-runtime one, so both
+ * write the same file.
+ */
+export function assembleCorpusFile(
+  name: string,
+  description: string,
+  filter: CorpusFilter,
+  observations: CorpusObservation[],
+  renderer: CorpusRenderer = new CorpusRenderer(),
+): CorpusFile {
+  const now = new Date().toISOString();
+  const corpus: CorpusFile = {
+    version: 1,
+    name,
+    description,
+    created_at: now,
+    updated_at: now,
+    filter,
+    stats: calculateStats(observations),
+    system_prompt: '',
+    session_id: null,
+    observations,
+  };
+  corpus.system_prompt = renderer.generateSystemPrompt(corpus);
+  corpus.stats.token_estimate = renderer.estimateTokens(renderer.renderCorpus(corpus));
+  return corpus;
+}
 
-    for (const obs of observations) {
-      typeBreakdown[obs.type] = (typeBreakdown[obs.type] || 0) + 1;
+function calculateStats(observations: CorpusObservation[]): CorpusStats {
+  const typeBreakdown: Record<string, number> = Object.create(null);
+  let earliestEpoch = Infinity;
+  let latestEpoch = -Infinity;
 
-      if (obs.created_at_epoch < earliestEpoch) earliestEpoch = obs.created_at_epoch;
-      if (obs.created_at_epoch > latestEpoch) latestEpoch = obs.created_at_epoch;
-    }
+  for (const obs of observations) {
+    typeBreakdown[obs.type] = (typeBreakdown[obs.type] || 0) + 1;
 
-    const earliest = observations.length > 0
-      ? new Date(earliestEpoch).toISOString()
-      : new Date().toISOString();
-    const latest = observations.length > 0
-      ? new Date(latestEpoch).toISOString()
-      : new Date().toISOString();
-
-    return {
-      observation_count: observations.length,
-      token_estimate: 0, // Will be updated after rendering
-      date_range: { earliest, latest },
-      type_breakdown: typeBreakdown,
-    };
+    if (obs.created_at_epoch < earliestEpoch) earliestEpoch = obs.created_at_epoch;
+    if (obs.created_at_epoch > latestEpoch) latestEpoch = obs.created_at_epoch;
   }
+
+  const earliest = observations.length > 0
+    ? new Date(earliestEpoch).toISOString()
+    : new Date().toISOString();
+  const latest = observations.length > 0
+    ? new Date(latestEpoch).toISOString()
+    : new Date().toISOString();
+
+  return {
+    observation_count: observations.length,
+    token_estimate: 0, // Will be updated after rendering
+    date_range: { earliest, latest },
+    type_breakdown: typeBreakdown,
+  };
 }

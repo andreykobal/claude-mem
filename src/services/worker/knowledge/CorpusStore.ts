@@ -21,8 +21,9 @@ export const CORPUS_NAME_ERROR =
 export class CorpusStore {
   private readonly corporaDir: string;
 
-  constructor() {
-    this.corporaDir = CORPORA_DIR;
+  /** `corporaDir`: server runtime keeps its corpora apart (corpora/server/<project>). */
+  constructor(corporaDir: string = CORPORA_DIR) {
+    this.corporaDir = corporaDir;
     if (!fs.existsSync(this.corporaDir)) {
       fs.mkdirSync(this.corporaDir, { recursive: true });
       logger.debug('WORKER', `Created corpora directory: ${this.corporaDir}`);

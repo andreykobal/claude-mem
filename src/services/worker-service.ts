@@ -1976,6 +1976,24 @@ export async function main() {
     return;
   }
 
+  // Server runtime's knowledge corpora (the MCP corpus tools spawn this): one
+  // operation as JSON on stdin, its outcome as one JSON line on stdout. No
+  // worker is started and no local store is opened.
+  if (command === 'corpus-server') {
+    const { runServerCorpusCommand } = await import('./worker/knowledge/ServerCorpusService.js');
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+    let outcome: { status: number; body: Record<string, unknown> };
+    try {
+      outcome = await runServerCorpusCommand(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    } catch (error) {
+      const status = typeof (error as { statusCode?: unknown })?.statusCode === 'number' ? (error as { statusCode: number }).statusCode : 500;
+      outcome = { status, body: { error: error instanceof Error ? error.message : String(error) } };
+    }
+    process.stdout.write(`${JSON.stringify(outcome)}\n`);
+    process.exit(0);
+  }
+
   const hookInitiatedCommands = ['start', 'hook', 'restart', '--daemon'];
   if ((command === undefined || hookInitiatedCommands.includes(command)) && isPluginDisabledInClaudeSettings()) {
     // Log the reason instead of exiting silently. Without this line, a disabled

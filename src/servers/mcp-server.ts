@@ -35,6 +35,7 @@ import { treeSitterCliUnavailableMessage } from '../services/smart-file-read/tre
 import { resolveWithinWorkspace } from '../services/smart-file-read/workspace-path.js';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { marketplaceDirectoryCandidates } from '../shared/known-marketplace-location.js';
 import { dirname, resolve } from 'node:path';
@@ -79,6 +80,8 @@ import { readServerWorkStateSection, toWorkStateEntries } from '../services/cont
 import { SERVER_PROJECT_NAME_REF_PREFIX } from '../services/hooks/runtime-selector.js';
 import { parseHttpArgs, startMcpHttpServer, type CwdResolver, type McpHttpOptions } from './mcp-http.js';
 import { createStdioCwdResolver } from './mcp-project-cwd.js';
+import { resolveWorkerRuntimePath } from '../services/infrastructure/ProcessManager.js';
+import { sanitizeEnv } from '../supervisor/env-sanitizer.js';
 import { buildWorkerOriginPolicy } from '../services/worker/http/origin-policy.js';
 
 /**
@@ -696,6 +699,44 @@ function serverProgressiveBackend(runtime: ServerRuntimeContext, project: string
       });
     },
   };
+}
+
+const SERVER_CORPUS_TIMEOUT_MS = 15 * 60_000;
+const SERVER_CORPUS_PURPOSE: Record<'build' | 'list' | 'prime' | 'query' | 'rebuild' | 'reprime', McpTextPurpose> = {
+  build: 'corpus-build', rebuild: 'corpus-build', list: 'corpus-list', prime: 'corpus-prime', reprime: 'corpus-prime', query: 'corpus-query',
+};
+
+/**
+ * A corpus tool in server runtime: one `worker-service corpus-server` run
+ * (Bun, which the corpus agent needs) reads the observations from the server
+ * and keeps the corpus on this machine; no worker is started. prime and query
+ * spend on the account the corpus-agent setting chooses, only on this call.
+ */
+async function runServerCorpus(op: keyof typeof SERVER_CORPUS_PURPOSE, args: Record<string, unknown>) {
+  const runtimePath = resolveWorkerRuntimePath();
+  // The worker-service beside this MCP server is the same build, so it knows corpus-server.
+  const ownScript = resolve(mcpServerDir, 'worker-service.cjs');
+  const scriptPath = existsSync(ownScript) ? ownScript : resolveWorkerScriptPath();
+  if (!runtimePath || !scriptPath) return mcpTextResult('Corpus tools need Bun and the plugin\'s worker-service script; neither was found.', true);
+  const outcome = await new Promise<{ status: number; body: Record<string, unknown> } | null>(resolve => {
+    const child = spawn(runtimePath, [scriptPath, 'corpus-server'], { stdio: ['pipe', 'pipe', 'ignore'], env: sanitizeEnv(process.env) });
+    let stdout = '';
+    const timer = setTimeout(() => { child.kill(); resolve(null); }, SERVER_CORPUS_TIMEOUT_MS);
+    child.stdout.on('data', chunk => { stdout += String(chunk); });
+    child.on('error', () => { clearTimeout(timer); resolve(null); });
+    child.on('close', () => {
+      clearTimeout(timer);
+      const line = stdout.trim().split('\n').pop() ?? '';
+      try { resolve(JSON.parse(line)); } catch { resolve(null); }
+    });
+    child.stdin.end(JSON.stringify({ op, cwd: getRequestCwd(), args }));
+  });
+  if (!outcome) return mcpTextResult('The corpus operation did not finish; retry it.', true);
+  if (outcome.status !== 200) {
+    const body = outcome.body ?? {};
+    return mcpTextResult([body.error, body.fix].filter(value => typeof value === 'string').join('\n') || `Corpus ${op} failed (${outcome.status}).`, true);
+  }
+  return formatMcpPayload(SERVER_CORPUS_PURPOSE[op], outcome.body);
 }
 
 /** work_state_write in server runtime: the row goes to the server project this checkout's hooks write to. */
@@ -1421,6 +1462,7 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
       additionalProperties: true
     },
     handler: async (args: any) => {
+      if (selectRuntime() === 'server') return runServerCorpus('build', args ?? {});
       return await callWorker('/api/corpus', { body: args, streamCorpusProgress: true });
     }
   },
@@ -1434,6 +1476,7 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
     },
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
     handler: async (args: any) => {
+      if (selectRuntime() === 'server') return runServerCorpus('list', args ?? {});
       return await callWorker('/api/corpus', { query: args });
     }
   },
@@ -1451,6 +1494,7 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
     handler: async (args: any) => {
       const { name, ...rest } = args;
       if (typeof name !== 'string' || name.trim() === '') throw new Error('Missing required argument: name');
+      if (selectRuntime() === 'server') return runServerCorpus('prime', { ...rest, name });
       return await callWorker(`/api/corpus/${encodeURIComponent(name)}/prime`, { body: rest, streamCorpusProgress: true });
     }
   },
@@ -1469,6 +1513,7 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
     handler: async (args: any) => {
       const { name, ...rest } = args;
       if (typeof name !== 'string' || name.trim() === '') throw new Error('Missing required argument: name');
+      if (selectRuntime() === 'server') return runServerCorpus('query', { ...rest, name });
       return await callWorker(`/api/corpus/${encodeURIComponent(name)}/query`, { body: rest, streamCorpusProgress: true });
     }
   },
@@ -1487,6 +1532,7 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
     handler: async (args: any) => {
       const { name, ...rest } = args;
       if (typeof name !== 'string' || name.trim() === '') throw new Error('Missing required argument: name');
+      if (selectRuntime() === 'server') return runServerCorpus('rebuild', { ...rest, name });
       return await callWorker(`/api/corpus/${encodeURIComponent(name)}/rebuild`, { body: rest, streamCorpusProgress: true });
     }
   },
@@ -1504,6 +1550,7 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
     handler: async (args: any) => {
       const { name, ...rest } = args;
       if (typeof name !== 'string' || name.trim() === '') throw new Error('Missing required argument: name');
+      if (selectRuntime() === 'server') return runServerCorpus('reprime', { ...rest, name });
       return await callWorker(`/api/corpus/${encodeURIComponent(name)}/reprime`, { body: rest, streamCorpusProgress: true });
     }
   }

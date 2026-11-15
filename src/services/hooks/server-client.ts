@@ -440,6 +440,14 @@ export class ServerClient {
     return this.request<ServerSearchObservationsResponse>('POST', '/v1/observations/by-file', payload, options);
   }
 
+  // A knowledge corpus's observations, oldest first (build_corpus in server runtime).
+  async selectObservations(input: {
+    projectId: string; query?: string; types?: string[]; concepts?: string[]; files?: string[];
+    dateStart?: string; dateEnd?: string; limit?: number;
+  }, options: ServerRequestOptions = {}): Promise<ServerSearchObservationsResponse> {
+    return this.request<ServerSearchObservationsResponse>('POST', '/v1/observations/select', input, options);
+  }
+
   // The team's project names (CLAUDE_MEM_CONTEXT_PROJECTS=all).
   async listProjects(options: ServerRequestOptions = {}): Promise<{ projects: Array<{ id: string; name: string }> }> {
     return this.request<{ projects: Array<{ id: string; name: string }> }>('GET', '/v1/projects', undefined, options);
