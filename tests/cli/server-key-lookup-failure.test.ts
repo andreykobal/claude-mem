@@ -20,7 +20,7 @@ async function rotate(mode: string) {
     './runtime.js': [
       'runServerRestartCommand', 'runServerStartCommand', 'runServerStatusCommand',
       'runServerStopCommand', 'runServerWorkerStartCommand', 'runRestartCommand',
-      'runServerApiKeyCommand', 'runStartCommand', 'runStatusCommand', 'runStopCommand',
+      'runServerApiKeyCommand', 'runServerImportCommand', 'runStartCommand', 'runStatusCommand', 'runStopCommand',
     ].map(name => `export function ${name}() { throw new Error('unexpected lifecycle command'); }`).join('\n'),
     './server-jobs.js': 'export async function runServerJobsCommand() {}',
     '../../services/hooks/server-bootstrap.js': `

@@ -183,6 +183,10 @@ export function runStatusCommand(): void {
   spawnBunWorkerCommand('status');
 }
 
+export function runServerImportCommand(extraArgs: string[] = []): void {
+  spawnBunWorkerCommand('server-import', extraArgs);
+}
+
 export function runServerApiKeyCommand(extraArgs: string[] = []): void {
   spawnBunWorkerCommand('server', ['api-key', ...extraArgs]);
 }

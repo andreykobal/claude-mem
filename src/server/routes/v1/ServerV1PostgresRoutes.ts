@@ -24,6 +24,7 @@ import { resolveDateBound } from '../../../shared/date-bounds.js';
 import {
   embedObservationRows,
   embedSearchQuery,
+  requestEmbeddingBackfill,
 } from '../../services/ObservationEmbeddingService.js';
 import { PostgresObservationEmbeddingsRepository } from '../../../storage/postgres/observation-embeddings.js';
 import { PostgresProjectsRepository } from '../../../storage/postgres/projects.js';
@@ -62,6 +63,9 @@ import {
 } from '../../../shared/server-context-limits.js';
 
 const SOURCE_ADAPTER_DEFAULT = 'api';
+
+/** Rows per /v1/import/observations request. */
+const IMPORT_BATCH_MAX = 200;
 
 /** The asking machine's share of a SessionStart window when several machines write one project. */
 const OWN_CONTEXT_SHARE = 0.7;
@@ -952,6 +956,68 @@ export class ServerV1PostgresRoutes implements RouteHandler {
           : {}),
       });
     }));
+
+    // History from a machine's local store (`worker-service server-import`):
+    // observations and session summaries as they were, with their original
+    // times, written by the importing machine's key. Never generates: a row is
+    // stored, and gets its vectors from the backfill. `key` makes a rerun add
+    // only rows not yet imported.
+    app.post('/v1/import/observations', writeAuth, this.handleCreate(
+      z.object({
+        projectId: z.string().min(1),
+        items: z.array(z.object({
+          key: z.string().min(1).max(200),
+          kind: z.string().min(1).max(100),
+          content: z.string().min(1),
+          metadata: z.record(z.string(), z.unknown()).optional(),
+          createdAtEpoch: z.number().int().positive(),
+        })).min(1).max(IMPORT_BATCH_MAX),
+      }),
+      async (req, res, body) => {
+        const teamId = this.requireTeamId(req, res);
+        if (!teamId || !this.ensureProjectAllowed(req, res, body.projectId)) return;
+        const project = await new PostgresProjectsRepository(this.options.pool).getByIdForTeam(body.projectId, teamId);
+        if (!project) {
+          res.status(404).json({ error: 'NotFound', message: 'project not found' });
+          return;
+        }
+        const authorKeyId = req.authContext?.apiKeyId ?? null;
+        const author = await authorLabel(this.options.pool, authorKeyId);
+        const repo = new PostgresObservationRepository(this.options.pool);
+        let inserted = 0;
+        let existing = 0;
+        try {
+          for (const item of body.items) {
+            const id = randomUUID();
+            const row = await repo.create({
+              id,
+              projectId: body.projectId,
+              teamId,
+              kind: item.kind,
+              content: item.content,
+              generationKey: `import:${item.key}`,
+              authorKeyId,
+              createdAtEpoch: item.createdAtEpoch,
+              metadata: {
+                ...item.metadata,
+                project: typeof item.metadata?.project === 'string' && item.metadata.project ? item.metadata.project : project.name,
+                ...(author ? { author } : {}),
+                imported: true,
+              },
+            });
+            if (row.id === id) inserted++; else existing++;
+          }
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          logger.warn('SYSTEM', 'import failed', { requestId: req.requestId ?? null }, err);
+          this.handleDbError(err, res, 'import');
+          return;
+        }
+        if (inserted > 0) requestEmbeddingBackfill();
+        await this.auditWrite(req, 'memory.write', null, body.projectId, { mode: 'import', inserted, existing });
+        res.status(200).json({ inserted, existing });
+      },
+    ));
 
     // POST /v1/memories — direct/manual observation insertion (compat alias).
     // MUST NOT call generator and MUST NOT create outbox rows.

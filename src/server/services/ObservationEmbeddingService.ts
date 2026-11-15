@@ -353,6 +353,7 @@ async function embedMissingObservations(
     const last = rows[rows.length - 1]!;
     after = { createdAt: last.createdAt, id: last.id };
 
+    const batchStartedAt = Date.now();
     let embedded: Array<EmbeddedParts | null> | null = await embedObservationRows(client, rows, embedder, { waitForModelMs: Infinity });
     if (options.signal?.aborted) break;
     if (!embedded) {
@@ -375,9 +376,78 @@ async function embedMissingObservations(
       totals.observations++;
       totals.parts += parts.parts.length;
     }
+    // Leave the CPU to requests and generation between batches: a container
+    // of one vCPU embedding at full speed answered nothing else for hours (a
+    // large import), and hooks dropped their events on the timeouts.
+    await pauseForDutyCycle(Date.now() - batchStartedAt, options.signal);
   }
   if (totals.observations > 0) {
     logger.info('SYSTEM', 'embedded observations that had no vectors', totals);
   }
   return totals;
+}
+
+/**
+ * CLAUDE_MEM_EMBEDDING_BACKFILL_DUTY: the share of time the backfill embeds
+ * (0 < duty <= 1, default 0.5): after a batch it pauses so that embedding
+ * takes at most this share of the wall clock.
+ */
+function backfillDuty(): number {
+  const value = Number(process.env.CLAUDE_MEM_EMBEDDING_BACKFILL_DUTY ?? '');
+  return Number.isFinite(value) && value > 0 && value <= 1 ? value : 0.5;
+}
+
+async function pauseForDutyCycle(batchMs: number, signal: AbortSignal | undefined): Promise<void> {
+  const duty = backfillDuty();
+  if (duty >= 1 || batchMs <= 0 || signal?.aborted) return;
+  const pauseMs = Math.min(60_000, Math.round(batchMs * (1 - duty) / duty));
+  await new Promise<void>(resolve => {
+    const timer = setTimeout(resolve, pauseMs);
+    signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+}
+
+/**
+ * The backfill as a service: it runs at start, and again whenever rows that
+ * need vectors arrive behind its cursor (an import writes rows with their
+ * original, older times, which a running pass ordered by created_at has
+ * already passed). A request during a pass runs one more pass after it.
+ */
+let scheduler: { pool: PostgresQueryable; signal: AbortSignal; running: Promise<void> | null; again: boolean } | null = null;
+
+function runScheduledPass(): void {
+  if (!scheduler || scheduler.running || scheduler.signal.aborted) return;
+  const current = scheduler;
+  current.again = false;
+  current.running = backfillMissingEmbeddings(current.pool, { signal: current.signal })
+    .then(() => {}, (error: unknown) => {
+      logger.warn('SYSTEM', 'embedding backfill stopped; it resumes at the next start or import', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    })
+    .finally(() => {
+      current.running = null;
+      if (current.again) runScheduledPass();
+    });
+}
+
+/** Start the backfill service (server start). Resolves once it is idle. */
+export function startEmbeddingBackfillScheduler(pool: PostgresQueryable, signal: AbortSignal): { idle(): Promise<void> } {
+  scheduler = { pool, signal, running: null, again: false };
+  runScheduledPass();
+  return {
+    async idle() {
+      while (scheduler?.running) await scheduler.running;
+    },
+  };
+}
+
+/** Rows without vectors were just written (an import): run a pass now, or one more after the current. */
+export function requestEmbeddingBackfill(): void {
+  if (!scheduler) return;
+  if (scheduler.running) {
+    scheduler.again = true;
+    return;
+  }
+  runScheduledPass();
 }

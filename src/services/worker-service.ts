@@ -1976,6 +1976,12 @@ export async function main() {
     return;
   }
 
+  // A machine's local history onto the server (instructions, part 2).
+  if (command === 'server-import') {
+    const { parseImportArgs, runServerHistoryImport } = await import('./import/ServerHistoryImport.js');
+    process.exit(await runServerHistoryImport(parseImportArgs(process.argv.slice(3))));
+  }
+
   // Server runtime's knowledge corpora (the MCP corpus tools spawn this): one
   // operation as JSON on stdin, its outcome as one JSON line on stdout. No
   // worker is started and no local store is opened.

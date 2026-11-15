@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { JsonObject, JsonValue, PostgresQueryable } from './utils.js';
+import { toPostgresJson } from './utils.js';
 import {
   assertProjectOwnership,
   assertSessionOwnership,
@@ -255,9 +256,10 @@ export class PostgresObservationRepository {
         input.teamId,
         input.serverSessionId ?? null,
         input.kind ?? 'observation',
-        input.content,
+        // Postgres text and jsonb reject NUL; an imported or tool-sourced row may carry one.
+        input.content.replaceAll('\u0000', ''),
         input.generationKey ?? null,
-        JSON.stringify(input.metadata ?? {}),
+        toPostgresJson(input.metadata ?? {}),
         input.embedding == null ? null : JSON.stringify(input.embedding),
         input.createdByJobId ?? null,
         input.authorKeyId ?? null,

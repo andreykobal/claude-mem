@@ -445,6 +445,14 @@ export class ServerClient {
     return this.request<ServerSearchObservationsResponse>('POST', '/v1/observations/by-file', payload, options);
   }
 
+  // `server-import`: a machine's local history, with original times; never generates.
+  async importObservations(input: {
+    projectId: string;
+    items: Array<{ key: string; kind: string; content: string; metadata?: Record<string, unknown>; createdAtEpoch: number }>;
+  }): Promise<{ inserted: number; existing: number }> {
+    return this.request<{ inserted: number; existing: number }>('POST', '/v1/import/observations', input, { timeoutMs: 120_000 });
+  }
+
   // A knowledge corpus's observations, oldest first (build_corpus in server runtime).
   async selectObservations(input: {
     projectId: string; query?: string; types?: string[]; concepts?: string[]; files?: string[];

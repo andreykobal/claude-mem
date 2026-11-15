@@ -13,7 +13,7 @@ import { getRedisQueueConfig } from '../queue/redis-config.js';
 import { ActiveServerQueueManager } from './ActiveServerQueueManager.js';
 import { ActiveServerGenerationWorkerManager } from './ActiveServerGenerationWorkerManager.js';
 import {
-  backfillMissingEmbeddings,
+  startEmbeddingBackfillScheduler,
   capEmbedderThreadsForBackfill,
   getSharedEmbedder,
   vectorSearchMode,
@@ -244,14 +244,10 @@ export async function createServerService(
     });
     if (active) generationWorkerManager.start();
     const stop = new AbortController();
-    const backfill = backfillMissingEmbeddings(pool, { signal: stop.signal }).then(() => {}, (error: unknown) => {
-      logger.warn('SYSTEM', 'embedding backfill stopped; it resumes at the next start', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
+    const backfill = startEmbeddingBackfillScheduler(pool, stop.signal);
     graph.stopBackgroundWork = async () => {
       stop.abort();
-      await backfill;
+      await backfill.idle();
     };
   }
   // Every role embeds (the server its queries, the worker its observations),

@@ -8,6 +8,7 @@ import {
   runServerWorkerStartCommand,
   runRestartCommand,
   runServerApiKeyCommand,
+  runServerImportCommand,
   runStartCommand,
   runStatusCommand,
   runStopCommand,
@@ -65,6 +66,12 @@ export async function runServerCommand(argv: string[] = []): Promise<void> {
   }
 
   if (runServerLifecycleCommand(subCommand)) {
+    return;
+  }
+
+  // A machine's local history onto the server: `npx claude-mem server import [--dry-run]`.
+  if (subCommand === 'import') {
+    runServerImportCommand(argv.slice(1));
     return;
   }
 

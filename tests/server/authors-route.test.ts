@@ -147,4 +147,17 @@ describe('authors: one key per machine', () => {
     expect(await tasks(teamKey)).toEqual(['A task']);
     expect(await tasks(machineB)).toEqual(['B task']);
   });
+
+  it('imports history with original times, the importing machine as author, once', async () => {
+    const items = [
+      { key: 'db:observations:1', kind: 'bugfix', content: 'Old fix', metadata: { title: 'Old fix' }, createdAtEpoch: 1_778_430_786_769 },
+      { key: 'db:session_summaries:1', kind: 'summary', content: 'Request: old', metadata: { request: 'old' }, createdAtEpoch: 1_778_430_900_000 },
+    ];
+    const first = await post('/v1/import/observations', { projectId: 'name:imported', items }, machineB);
+    expect(first.json).toEqual({ inserted: 2, existing: 0 });
+    expect((await post('/v1/import/observations', { projectId: 'name:imported', items }, machineB)).json).toEqual({ inserted: 0, existing: 2 });
+    const rows = (await post('/v1/search', { projectId: 'name:imported', orderBy: 'date_asc', category: 'all', author: 'b' })).json.observations;
+    expect(rows.map((o: any) => [o.content, o.createdAtEpoch, o.author, o.metadata.project, o.metadata.imported]))
+      .toEqual([['Old fix', 1_778_430_786_769, 'B', 'imported', true], ['Request: old', 1_778_430_900_000, 'B', 'imported', true]]);
+  });
 });
